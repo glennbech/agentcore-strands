@@ -1,27 +1,30 @@
-"""Dessertifier agent — turns a savory dish into a dessert version that keeps
-every original ingredient intact. Anchovies stay anchovies, BBQ sauce stays
-BBQ sauce — they just get candied, whipped, or folded into meringue. The
-result is meant to be absurd.
+"""Dessertifier agent — you chat with it about savory dishes and it responds
+with dessert versions that keep every original ingredient intact. Anchovies
+stay anchovies, BBQ sauce stays BBQ sauce; they just get candied, whipped,
+or folded into meringue. The result is meant to be absurd.
 
-Why this is a good demo of agents: the model will happily *claim* it kept
-every ingredient, but often quietly drops the unpleasant ones. A
-`check_ingredients` tool that greps the dessert recipe for every original
-ingredient gives the model ground truth. If anything is missing, it rewrites
-and checks again — that loop is what makes this an agent instead of a single
-prompt.
+The agent is *conversational and stateful*, not a text-in/text-out endpoint:
+
+- Every request carries a `session_id`. AgentCore Runtime routes all
+  requests for the same session to the same container instance, so the
+  Strands `Agent` object stays alive across turns and remembers what was
+  said. Different `session_id` → different Agent → different memory.
+- Two session-scoped tools make that memory *visible*:
+    - `remember(fact)` persists a fact for the rest of the session
+      (preferences, allergies, dislikes).
+    - `recall()` returns everything the session has been told to remember.
+  Because they show up in the returned `iterations` list, students can
+  literally watch the agent write to and read from session memory.
+- A third tool, `check_ingredients(recipe, ingredients)`, is the
+  ground-truth loop that forces the model to actually keep every original
+  ingredient (it will happily claim to and then quietly drop the
+  unpleasant ones without the tool holding it accountable).
 
 Exposes the two HTTP endpoints AgentCore Runtime requires:
 
   GET  /ping          → health check
-  POST /invocations   → body:
-                          - {"dish": "pizza"}                    # single-shot
-                          - {"message": "...", "session_id": ""} # multi-turn chat
-                        → {"recipe", "iterations": [{tool, input, output}, ...]}
-
-`iterations` surfaces the agent's tool-call loop so callers can see it work.
-Multi-turn mode keeps one Agent per session_id in memory — AgentCore's
-session-based routing sends every turn for a given runtimeSessionId to the
-same container, so the Agent's message history carries across turns.
+  POST /invocations   → body {"message": "...", "session_id": "..."}
+                        → {"reply", "iterations": [{tool, input, output}, ...]}
 """
 
 import os
@@ -50,38 +53,82 @@ def check_ingredients(recipe: str, ingredients: list[str]) -> dict:
     return {"present": present, "missing": missing}
 
 
-SYSTEM_PROMPT = """You are Dessertifier. The user names a savory dish. You
-reply with a DESSERT version of that dish. The twist: every core ingredient
-of the original savory dish MUST appear in your dessert version. Tomatoes
-stay tomatoes. Anchovies stay anchovies. BBQ sauce stays BBQ sauce. Ground
-beef stays ground beef. You may candy, whip, chocolate-dip, caramelize,
-fold into custard, layer with meringue, or otherwise coax them into dessert
-form — but do not substitute them away. Lean into the absurdity.
+SYSTEM_PROMPT = """You are Dessertifier. You chat with the user about savory
+dishes and reply with DESSERT versions of them. The twist: every core
+ingredient of the original savory dish MUST appear in your dessert version.
+Tomatoes stay tomatoes. Anchovies stay anchovies. BBQ sauce stays BBQ sauce.
+Ground beef stays ground beef. You may candy, whip, chocolate-dip,
+caramelize, fold into custard, layer with meringue, or otherwise coax them
+into dessert form — but do not substitute them away. Lean into the absurdity.
 
-Procedure:
-1. List 5–10 core ingredients of the ORIGINAL savory dish.
-2. Draft a dessert recipe titled "<Dish> Dessert" with two sections:
-   Ingredients (list) and Method (numbered steps). Every ingredient from
-   step 1 must appear literally in the Ingredients list of your draft.
-3. Call `check_ingredients(recipe=<your full draft>, ingredients=<list from step 1>)`
+You have session-scoped memory via two tools:
+- `remember(fact)`: whenever the user shares a preference, allergy, dislike,
+  or style choice ("I'm allergic to nuts", "I hate coconut", "keep it dark
+  chocolate"), immediately call `remember(fact=<concise fact>)`.
+- `recall()`: BEFORE drafting any recipe, call `recall()` to see everything
+  this session has been told to remember. Honor every constraint you find —
+  never include ingredients the user is allergic to or has said they dislike.
+
+Procedure when the user names a dish:
+1. Call `recall()` to load session memory.
+2. List 5–10 core ingredients of the ORIGINAL savory dish (skipping/replacing
+   anything memory tells you the user won't eat).
+3. Draft a recipe titled "<Dish> Dessert" with two sections: Ingredients
+   (list) and Method (numbered steps). Every ingredient from step 2 must
+   appear literally in the Ingredients list of your draft.
+4. Call `check_ingredients(recipe=<your full draft>, ingredients=<list from step 2>)`
    to verify. The tool is ground truth; your own scan is not.
-4. If anything is missing, rewrite to include it in a dessert-appropriate
+5. If anything is missing, rewrite to include it in a dessert-appropriate
    way, then check again. Loop until nothing is missing.
-5. Output only the final recipe — title, Ingredients section, Method
+6. Output only the final recipe — title, Ingredients section, Method
    section. No preamble, no tool trace, no meta commentary.
+
+When the user asks to revise a prior recipe ("more caramelly", "add
+pistachio"), output the full revised recipe under the same rules.
+
+When the user just chats or shares preferences without asking for a recipe,
+respond in one or two conversational sentences after calling `remember` if
+appropriate.
 """
 
 
-# Model is expensive-ish to construct (initializes a boto3 client); the Agent
-# wrapping it is cheap. Single-shot requests build a fresh Agent per call so
-# agent.messages is a clean per-invocation trace; chat requests keep one
-# Agent per session_id so message history carries across turns.
+# Model is expensive-ish to construct (initializes a boto3 client); Agents
+# wrapping it are cheap. We keep one Agent per session_id so its message
+# history — plus its session-scoped remember/recall closure — carries across
+# turns for the same runtimeSessionId.
 _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
 _sessions: dict[str, Agent] = {}
+_session_memory: dict[str, list[str]] = {}
 
 
-def _new_agent() -> Agent:
-    return Agent(model=_model, system_prompt=SYSTEM_PROMPT, tools=[check_ingredients])
+def _make_session_tools(session_id: str) -> list:
+    """Build tools whose state is scoped to this session_id via closure.
+    Different sessions get different memory lists, which is what makes the
+    'same input, different session, different result' demo work."""
+    memory = _session_memory.setdefault(session_id, [])
+
+    @tool
+    def remember(fact: str) -> str:
+        """Persist a fact for the rest of this session. Use for user
+        preferences, allergies, dislikes, or style choices you should honor
+        in every subsequent recipe this session."""
+        memory.append(fact)
+        return f"remembered: {fact}"
+
+    @tool
+    def recall() -> list[str]:
+        """Return every fact this session has been told to remember."""
+        return list(memory)
+
+    return [check_ingredients, remember, recall]
+
+
+def _new_agent(session_id: str) -> Agent:
+    return Agent(
+        model=_model,
+        system_prompt=SYSTEM_PROMPT,
+        tools=_make_session_tools(session_id),
+    )
 
 
 def _extract_iterations(messages: list[dict]) -> list[dict]:
@@ -122,28 +169,17 @@ def ping():
 @app.post("/invocations")
 async def invoke(request: Request):
     body = await request.json()
-    dish = body.get("dish")
     message = body.get("message")
     session_id = body.get("session_id")
 
-    if message and session_id:
-        # Multi-turn: reuse the Agent across calls so it remembers the
-        # conversation. Snapshot messages length so we only report tool
-        # calls made THIS turn.
-        agent = _sessions.setdefault(session_id, _new_agent())
-        before = len(agent.messages)
-        result = str(agent(message)).strip()
-        iterations = _extract_iterations(agent.messages[before:])
-        return JSONResponse({"recipe": result, "iterations": iterations})
+    if not (message and session_id):
+        return JSONResponse(
+            {"error": "payload must include 'message' (string) and 'session_id' (string)"},
+            status_code=400,
+        )
 
-    if dish:
-        agent = _new_agent()
-        prompt = f"Give me a dessert version of: {dish}"
-        result = str(agent(prompt)).strip()
-        iterations = _extract_iterations(agent.messages)
-        return JSONResponse({"dish": dish, "recipe": result, "iterations": iterations})
-
-    return JSONResponse(
-        {"error": "payload must include either 'dish' (string) or both 'message' and 'session_id' (strings)"},
-        status_code=400,
-    )
+    agent = _sessions.setdefault(session_id, _new_agent(session_id))
+    before = len(agent.messages)
+    reply = str(agent(message)).strip()
+    iterations = _extract_iterations(agent.messages[before:])
+    return JSONResponse({"reply": reply, "iterations": iterations})

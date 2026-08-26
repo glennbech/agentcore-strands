@@ -44,18 +44,26 @@ def pad_session(name: str) -> str:
     return (name + "-" * 33)[:33] if len(name) < 33 else name
 
 
+def format_iteration(tool: str, output) -> str:
+    if tool == "check_ingredients" and isinstance(output, dict) and "missing" in output:
+        missing = output["missing"]
+        return "all present ✓" if not missing else f"missing: {missing}"
+    if tool == "remember":
+        return str(output)
+    if tool == "recall":
+        if isinstance(output, list):
+            return f"recalled {len(output)} fact(s): {output}" if output else "nothing remembered yet"
+    return json.dumps(output)
+
+
 def print_iterations(iterations: list[dict]) -> None:
     if not iterations:
         return
     print(f"[agent loop: {len(iterations)} tool call(s)]", file=sys.stderr)
     for i, it in enumerate(iterations, 1):
-        output = it.get("output", {})
-        if isinstance(output, dict) and "missing" in output:
-            missing = output["missing"]
-            status = "all present ✓" if not missing else f"missing: {missing}"
-        else:
-            status = json.dumps(output)
-        print(f"  {i}. {it.get('tool')} → {status}", file=sys.stderr)
+        tool = it.get("tool", "?")
+        status = format_iteration(tool, it.get("output", {}))
+        print(f"  {i}. {tool} → {status}", file=sys.stderr)
     print("", file=sys.stderr)
 
 
@@ -100,7 +108,7 @@ def main() -> None:
             continue
 
         print_iterations(data.get("iterations", []))
-        print(data.get("recipe", data))
+        print(data.get("reply", data))
         print()
 
 

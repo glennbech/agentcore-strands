@@ -198,28 +198,49 @@ curl -s http://localhost:8080/ping                    # {"status":"Healthy"}
 
 curl -s -X POST http://localhost:8080/invocations \
   -H 'Content-Type: application/json' \
-  -d '{"dish": "pizza"}' | jq .
+  -d '{"message": "give me a pizza dessert", "session_id": "local-demo"}' | jq .
 ```
 
-You should get back a JSON object with `dish`, `recipe`, and — this is the
-important bit — an `iterations` array. Each entry is one `check_ingredients`
-call: what the agent asked, what the tool answered. Skim it:
+You should get back a JSON object with `reply` and — this is the important
+bit — an `iterations` array. Each entry is one tool call the agent made:
+what it asked, what the tool answered. Skim it:
 
 ```json
 {
-  "dish": "pizza",
-  "recipe": "Pizza Dessert\nIngredients:\n- ...",
+  "reply": "Pizza Dessert\nIngredients:\n- ...",
   "iterations": [
+    {"tool": "recall",            "input": {}, "output": []},
     {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": ["anchovy"]}},
     {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": []}}
   ]
 }
 ```
 
-That array *is* the agent loop. The model drafted, the tool said "you
-dropped anchovy", the model redrafted, the tool said "all present", the
-model returned the recipe. This is the difference between an agent and a
-single LLM call. Troubleshooting:
+That array *is* the agent loop. The model called `recall` first (empty, no
+memory yet), drafted the recipe, `check_ingredients` said "you dropped
+anchovy", the model redrafted, `check_ingredients` said "all present", the
+model returned the reply. This is the difference between an agent and a
+single LLM call.
+
+Now try session memory. Send two messages on the same `session_id`:
+
+```bash
+# Turn 1: tell it something
+curl -s -X POST http://localhost:8080/invocations -H 'Content-Type: application/json' \
+  -d '{"message": "I hate coconut and I am allergic to nuts", "session_id": "local-demo"}' | jq .
+
+# Turn 2: ask for a recipe — recall should return your two facts
+curl -s -X POST http://localhost:8080/invocations -H 'Content-Type: application/json' \
+  -d '{"message": "make me a pad thai dessert", "session_id": "local-demo"}' | jq .
+```
+
+In turn 1's iterations you'll see `remember → "remembered: hates coconut"`
+and `remember → "remembered: allergic to nuts"`. In turn 2's iterations,
+`recall` returns those two facts and the recipe avoids both. Change
+`session_id` to `"other"` on turn 2 and `recall` returns `[]` — different
+session, different memory. That's session affinity, visible.
+
+Troubleshooting:
 
 - **`AccessDeniedException`** — model access isn't enabled for your account.
   The instructor handles model access; flag it if this fires.
@@ -245,8 +266,8 @@ single LLM call. Troubleshooting:
 for dish in "caesar salad" "bbq ribs" "beef bourguignon" "pad thai"; do
   curl -s -X POST http://localhost:8080/invocations \
     -H 'Content-Type: application/json' \
-    -d "{\"dish\": \"$dish\"}" \
-    | jq '{dish, iterations: [.iterations[] | {tool, missing: .output.missing}], recipe}'
+    -d "{\"message\": \"give me a $dish dessert\", \"session_id\": \"tour-$RANDOM\"}" \
+    | jq '{iterations: [.iterations[] | {tool, out: (.output.missing // .output)}], reply}'
   echo "---"
 done
 ```
@@ -376,27 +397,30 @@ cd ..
 # Re-activate the venv you made in Step 1 if you're in a fresh shell:
 #   source agent/.venv/bin/activate
 pip install --upgrade boto3     # need a recent version for bedrock-agentcore
-python3 scripts/invoke.py "pizza"
-python3 scripts/invoke.py "bbq ribs"
-python3 scripts/invoke.py "beef bourguignon"
+python3 scripts/invoke.py "give me a pizza dessert"
+python3 scripts/invoke.py "bbq ribs dessert please"
+python3 scripts/invoke.py "I am allergic to nuts. Make me a beef bourguignon dessert."
 ```
 
-`invoke.py` reads the ARN from `terraform output` automatically. It prints
-the agent loop to stderr before the recipe — one line per tool call — so
-you can see the agent working, e.g.:
+`invoke.py` sends one message with a fresh throwaway `session_id` per call
+(so nothing persists between runs — for that, see the chat REPL below).
+It prints the agent loop to stderr before the reply — one line per tool
+call — so you can see the agent working, e.g.:
 
 ```
-Agent loop — 2 tool call(s):
-  1. check_ingredients → missing: ['anchovy']
-  2. check_ingredients → all present ✓
+Agent loop — 4 tool call(s):
+  1. remember → remembered: allergic to nuts
+  2. recall → recalled 1 fact(s): ['allergic to nuts']
+  3. check_ingredients → missing: ['pearl onions']
+  4. check_ingredients → all present ✓
 
-Pizza Dessert
+Beef Bourguignon Dessert
 Ingredients:
 - ...
 ```
 
-Redirect stderr away (`2>/dev/null`) if you just want the recipe. The
-`--session` flag sets the AgentCore session id (padded to 33 chars).
+Redirect stderr away (`2>/dev/null`) if you just want the reply. `--session`
+lets you pin a session name if you want to hit the same container twice.
 
 > **Gotcha:** a session id is sticky to the runtime version it first hit. If
 > you re-`apply` Terraform with a new `model_id` (or otherwise create a new
@@ -418,36 +442,46 @@ You'll see the FastAPI request line, the Strands model call, the tool
 invocation, and the response — the exact same log stream you'd get running it
 locally, just on someone else's box.
 
-### Chat with the agent (multi-turn)
+### Chat with the agent (multi-turn + session memory)
 
-`invoke.py` sends one shot and exits. To have an actual conversation — where
-the agent remembers what it just made and you can iterate on it — use:
+`invoke.py` sends one shot on a throwaway session. For an actual
+conversation where the agent remembers what you told it, use:
 
 ```bash
 python3 scripts/recipechat.py
 ```
 
 AgentCore routes every turn for the same `runtimeSessionId` to the same
-container instance, so the container keeps one Strands `Agent` alive per
-session. The `Agent`'s message history carries across turns, meaning you
-can say:
+container instance. The container keeps one Strands `Agent` per session,
+and each Agent has session-scoped `remember` and `recall` tools closed
+over a per-session memory list. Different `session_id` → different Agent
+→ different memory. Try:
 
 ```
-you > pizza
-[agent loop + Pizza Dessert recipe]
+you > I am allergic to nuts and I hate coconut
+[agent loop]
+  1. remember → remembered: allergic to nuts
+  2. remember → remembered: dislikes coconut
+Noted.
 
-you > make it more caramelly, and add pistachio
-[agent loop + revised recipe with more caramel and pistachio, still every
- pizza ingredient present]
+you > pizza
+[agent loop]
+  1. recall → recalled 2 fact(s): ['allergic to nuts', 'dislikes coconut']
+  2. check_ingredients → all present ✓
+Pizza Dessert
+Ingredients: (no nuts, no coconut, all pizza ingredients present)
+...
 
 you > now do bbq ribs
-[agent loop + BBQ Ribs Dessert recipe, fresh conversation on the same session]
+[agent loop]
+  1. recall → recalled 2 fact(s): [...]     ← same session, same memory
+  2. check_ingredients → all present ✓
 ```
 
-Under the hood the payload is `{"message": "...", "session_id": "..."}`
-instead of `{"dish": "..."}`, and the container `setdefault`s an `Agent` in
-a dict keyed by session_id. This is real chat with an agent, not a
-sequence of independent single-shot calls.
+Open a second `recipechat.py` in another terminal and ask for the same
+recipes — `recall` returns `[]` because it's a fresh session. That
+contrast is the point: it's not the code that "remembers" — it's the
+session-scoped Agent living inside a specific container.
 
 ---
 
