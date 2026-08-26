@@ -359,11 +359,6 @@ Verify the image made it:
 aws ecr list-images --repository-name dessertifier-agent-${SUFFIX} --region us-east-1
 ```
 
-You'll actually see **three** digests: the manifest list (which is what
-`:latest` points at), the arm64 manifest, and an attestation manifest that
-buildx pushes alongside. Only the manifest list has a tag. That's normal for
-`buildx --push`; not a bug.
-
 ---
 
 ## Step 4 — Deploy the AgentCore Runtime (10 min)
