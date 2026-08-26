@@ -214,6 +214,15 @@ bits:
 
 ### Run it locally
 
+Before you start: **this local run isn't an agent anyone else can use.**
+It's a Python web server on your Codespace, bound to a port only you can
+reach — no public URL, no auth, no persistence across container restarts,
+no session-routed replicas. Great for confirming the code works before we
+ship it. To turn it into something the rest of the world (or even a
+teammate) can call, you have to package it into a container (Step 3) and
+hand it to AgentCore Runtime to host (Step 4). That's when it becomes a
+deployed agent with a real ARN, TLS, IAM auth, and durable memory.
+
 ```bash
 cd agent
 python3 -m venv .venv
