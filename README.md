@@ -95,8 +95,7 @@ Before you touch anything:
    unzip awscliv2.zip
    sudo ./aws/install
    ```
-   Do **not** `pip install awscli` — that gives you v1 and breaks
-   `aws logs tail` and `bedrock-agentcore-control`. Verify:
+   Verify:
    ```bash
    aws --version    # aws-cli/2.x.x
    ```
