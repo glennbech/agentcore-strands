@@ -85,26 +85,35 @@ is what teams actually use in production agent deployments.
 
 Before you touch anything:
 
-1. **AWS account with credentials configured.**
+1. **Open this repo in your Codespace.**
+
+2. **Install the AWS CLI v2.** The Codespace base image doesn't ship it. In
+   the Codespace terminal:
+   ```bash
+   cd /tmp
+   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+   unzip awscliv2.zip
+   sudo ./aws/install
+   ```
+   Do **not** `pip install awscli` — that gives you v1 and breaks
+   `aws logs tail` and `bedrock-agentcore-control`. Verify:
+   ```bash
+   aws --version    # aws-cli/2.x.x
+   ```
+
+3. **Configure AWS credentials.**
    ```bash
    aws configure                     # region: us-east-1 is safest for Bedrock
    aws sts get-caller-identity       # sanity check
    ```
 
-2. **Tools already in your Codespace** (this workshop assumes GitHub Codespaces
-   — the `.devcontainer/devcontainer.json` in this repo installs everything).
-   Sanity-check:
+4. **Sanity-check the rest of the toolchain** (all preinstalled by the
+   devcontainer):
    ```bash
    docker buildx version    # buildx (for ARM64 builds)
    terraform version        # >= 1.6
    python3 --version        # >= 3.11
-   aws --version             # v2.15+ (needed for `bedrock-agentcore-control`)
    ```
-   If you're *not* on a Codespace and one of these is missing or old, install
-   from the official source (AWS CLI: <https://aws.amazon.com/cli/> — do **not**
-   `pip install awscli`, that gives you v1 and breaks `aws logs tail`).
-
-3. **Open this repo in your Codespace.**
 
 > **Cost warning:** ECR storage is cents. AgentCore charges per invocation.
 > Claude Haiku is ~$0.0001 per short call. If you finish the exercise and run
