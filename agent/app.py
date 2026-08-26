@@ -151,10 +151,9 @@ def _new_agent(session_id: str) -> Agent:
     )
 
 
+# Walks the message history and returns each tool call the agent made,
+# pairing toolUse blocks with their matching toolResult by toolUseId.
 def _extract_iterations(messages: list[dict]) -> list[dict]:
-    """Pair up toolUse blocks (assistant) with matching toolResult blocks
-    (user) to reconstruct the loop. Returns a list ordered by call, each
-    element {tool, input, output}."""
     pending: dict[str, dict] = {}
     iterations: list[dict] = []
     for msg in messages:
