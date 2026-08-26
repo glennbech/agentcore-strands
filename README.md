@@ -309,26 +309,6 @@ terraform init     # first init downloads ~1 GB of providers; grab a coffee
 terraform apply
 ```
 
-### A note on providers: `aws` vs `awscc`
-
-AgentCore is a very new AWS service. When brand-new services launch, they
-usually appear first in the **`hashicorp/awscc`** provider (auto-generated
-from CloudFormation schemas), and only later in the handwritten
-**`hashicorp/aws`** provider that most people are used to. For a while
-`awscc` was the only way to manage AgentCore from Terraform. The `aws`
-provider has since caught up (`aws_bedrockagentcore_agent_runtime` and ~20
-sibling resources), and it's what we use here.
-
-Why prefer the handwritten `aws` provider when both work:
-
-- Cleaner HCL syntax (block form vs `awscc`'s nested-object assignment).
-- Built-in retry for common gotchas — including **IAM eventual consistency**,
-  which we would otherwise have to work around with a `time_sleep` block.
-- Better documentation and community examples.
-
-Keep `awscc` in your back pocket for the *next* new AWS service that
-appears — the pattern (aws lags, awscc leads, aws catches up) repeats.
-
 ### While apply runs, read `main.tf`. Pay attention to:
 
 - **The trust policy** on `aws_iam_role.runtime` — only the AgentCore service
@@ -485,5 +465,4 @@ Pick one, get it working, share with the class:
 
 - Strands Agents: <https://strandsagents.com/>
 - AgentCore Runtime: <https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime.html>
-- `awscc` Terraform provider: <https://registry.terraform.io/providers/hashicorp/awscc/latest/docs>
 - Bedrock model catalog: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html>
