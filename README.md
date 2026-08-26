@@ -311,14 +311,10 @@ terraform apply
 
 ### While apply runs, read `main.tf`. Pay attention to:
 
-- **The trust policy** on `aws_iam_role.runtime` — only the AgentCore service
-  (`bedrock-agentcore.amazonaws.com`) can assume the role, and only when the
-  request comes from your own AWS account (`aws:SourceAccount`) and is acting
-  on an AgentCore resource in your account (`aws:SourceArn`). In plain English:
-  we're saying *"AgentCore, you can use this role, but only when you're doing
-  something for me"* — that stops another AWS customer from tricking AgentCore
-  into using our role for their agent (a class of bug called the
-  "confused-deputy problem").
+- **The trust policy** on `aws_iam_role.runtime` — only the AgentCore
+  service (`bedrock-agentcore.amazonaws.com`) can assume the role. Kept
+  workshop-lax on purpose; production policies add `aws:SourceAccount` /
+  `aws:SourceArn` conditions to close the confused-deputy hole.
 - **The image URI** — pinned by *digest*, not tag. When you re-push a new image,
   the `data.aws_ecr_image` re-reads the digest and Terraform sees a diff, which
   forces a runtime update. If you used `:latest` directly, Terraform would never
