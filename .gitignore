@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Terraform state — never commit
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!terraform.tfvars.example
+
+# Local editor / OS
+.DS_Store
+.idea/
+.vscode/

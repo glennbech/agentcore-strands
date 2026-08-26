@@ -1,0 +1,4 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+strands-agents==0.1.9
+boto3==1.40.37
