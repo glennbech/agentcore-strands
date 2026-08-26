@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
-REPO_NAME="${REPO_NAME:-emojifier-agent}"
+REPO_NAME="${REPO_NAME:-dessertifier-agent}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"

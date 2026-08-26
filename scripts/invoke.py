@@ -2,10 +2,10 @@
 """Invoke the deployed AgentCore runtime.
 
 Usage:
-    python3 scripts/invoke.py 5 "The quarterly report is due Friday."
-    python3 scripts/invoke.py 0 "Rip out every emoji: 🎉🎉 party time 🎉🎉"
-    python3 scripts/invoke.py 3 "Standup at 10, then coffee." --session mysession
-    AGENT_RUNTIME_ARN=arn:aws:... python3 scripts/invoke.py 7 "hi team"
+    python3 scripts/invoke.py "pizza"
+    python3 scripts/invoke.py "beef bourguignon"
+    python3 scripts/invoke.py "bbq ribs" --session mysession
+    AGENT_RUNTIME_ARN=arn:aws:... python3 scripts/invoke.py "caesar salad"
 """
 
 import argparse
@@ -34,8 +34,7 @@ def pad_session(name: str) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("target", type=int, help="Exact number of emojis to end up with.")
-    p.add_argument("text", help="The text to emojify.")
+    p.add_argument("dish", help="Name of the savory dish to dessertify.")
     p.add_argument("--session", default="default",
                    help="Logical session name; padded to 33 chars if shorter.")
     p.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
@@ -48,17 +47,14 @@ def main() -> None:
     resp = client.invoke_agent_runtime(
         agentRuntimeArn=arn,
         runtimeSessionId=session_id,
-        payload=json.dumps({"text": args.text, "target": args.target}).encode("utf-8"),
+        payload=json.dumps({"dish": args.dish}).encode("utf-8"),
     )
     body = resp["response"].read().decode("utf-8")
 
     try:
         data = json.loads(body)
-        # Print the rewritten text on its own line, then the count summary.
-        if "result" in data:
-            print(data["result"])
-            print(f"\n[emoji_count={data.get('emoji_count')} target={data.get('target')}]",
-                  file=sys.stderr)
+        if "recipe" in data:
+            print(data["recipe"])
         else:
             print(json.dumps(data, indent=2))
     except json.JSONDecodeError:

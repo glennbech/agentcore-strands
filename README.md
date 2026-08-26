@@ -1,9 +1,15 @@
-# Emojifier — an AgentCore + Strands discovery exercise
+# Dessertifier — an AgentCore + Strands discovery exercise
 
-Rewrite any piece of text to contain *exactly* N emojis. Sounds trivial —
-until you remember LLMs cannot count. To hit an exact number the agent has
-to loop: rewrite, ask a tool for the true count, adjust, check, done. That's
-a real agent loop in about 40 lines of Python.
+Name a savory dish. Get back a *dessert* version of it — with every original
+ingredient still intact. Anchovies stay anchovies, BBQ sauce stays BBQ sauce;
+they just get candied, whipped, or folded into meringue. The results are
+absurd on purpose.
+
+The interesting bit: the model will happily *claim* it kept every ingredient
+and then quietly drop the unpleasant ones. To force it to actually keep them,
+the agent has to loop: draft a recipe, ask a tool which ingredients are still
+present, add back whatever's missing, check again, done. That's a real agent
+loop in about 60 lines of Python.
 
 The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
 agent to AWS in about an hour.**
@@ -118,12 +124,14 @@ curl -s http://localhost:8080/ping                    # {"status":"Healthy"}
 
 curl -s -X POST http://localhost:8080/invocations \
   -H 'Content-Type: application/json' \
-  -d '{"text": "The quarterly report is due Friday.", "target": 5}' | jq .
+  -d '{"dish": "pizza"}' | jq .
 ```
 
-You should get back a JSON object with `result`, `emoji_count`, and `target` —
-and `emoji_count` should equal `target`. If it does, the agent successfully
-looped through the `count_emojis` tool until it hit the mark. Troubleshooting:
+You should get back a JSON object with `dish` and `recipe` — the `recipe`
+field will be a dessert version of the dish with every original ingredient
+still present. If it looks reasonable (or, more accurately, gloriously
+unreasonable), the agent successfully looped through the `check_ingredients`
+tool until nothing was missing. Troubleshooting:
 
 - **`AccessDeniedException`** — model access isn't enabled (prereqs, step 2).
 - **`ResourceNotFoundException: Model use case details have not been submitted`**
@@ -145,20 +153,18 @@ looped through the `count_emojis` tool until it hit the mark. Troubleshooting:
 ### Poke at it more
 
 ```bash
-for pair in '0:"Rip out every emoji: 🎉🎉 party time 🎉🎉"' \
-            '3:"Standup at 10, then coffee, then real work."' \
-            '10:"Deploy the new API to production."'; do
-  target="${pair%%:*}"; text="${pair#*:}"
+for dish in "caesar salad" "bbq ribs" "beef bourguignon" "pad thai"; do
   curl -s -X POST http://localhost:8080/invocations \
     -H 'Content-Type: application/json' \
-    -d "{\"text\": $text, \"target\": $target}" | jq .
+    -d "{\"dish\": \"$dish\"}" | jq -r .recipe
   echo "---"
 done
 ```
 
-Watch the uvicorn logs — you'll see the model call `count_emojis` multiple
-times per invocation, adjusting until the count matches. That's the agent
-loop, running locally, exactly the same as it will on AgentCore.
+Watch the uvicorn logs — you'll see the model call `check_ingredients` one or
+more times per invocation, adding back anything it dropped until nothing is
+missing. That's the agent loop, running locally, exactly the same as it will
+on AgentCore.
 
 Kill the local server before moving on. Because we launched it with `&`, the
 easiest way is:
@@ -179,14 +185,14 @@ an image (and before Terraform can look it up).
 
 ```bash
 aws ecr create-repository \
-  --repository-name emojifier-agent \
+  --repository-name dessertifier-agent \
   --region us-east-1
 ```
 
 Confirm:
 
 ```bash
-aws ecr describe-repositories --repository-names emojifier-agent \
+aws ecr describe-repositories --repository-names dessertifier-agent \
   --region us-east-1 \
   --query 'repositories[0].repositoryUri' --output text
 ```
@@ -218,7 +224,7 @@ The script:
 Verify the image made it:
 
 ```bash
-aws ecr list-images --repository-name emojifier-agent --region us-east-1
+aws ecr list-images --repository-name dessertifier-agent --region us-east-1
 ```
 
 You'll actually see **three** digests: the manifest list (which is what
@@ -302,9 +308,9 @@ cd ..
 # Re-activate the venv you made in Step 1 if you're in a fresh shell:
 #   source agent/.venv/bin/activate
 pip install --upgrade boto3     # need a recent version for bedrock-agentcore
-python3 scripts/invoke.py 5 "The quarterly report is due Friday."
-python3 scripts/invoke.py 0 "Rip out every emoji: 🎉🎉 party time 🎉🎉"
-python3 scripts/invoke.py 12 "Deploy the new API to production this afternoon."
+python3 scripts/invoke.py "pizza"
+python3 scripts/invoke.py "bbq ribs"
+python3 scripts/invoke.py "beef bourguignon"
 ```
 
 `invoke.py` reads the ARN from `terraform output` automatically. Note the
@@ -344,7 +350,7 @@ Then delete the ECR repo (Terraform doesn't own it):
 
 ```bash
 aws ecr delete-repository \
-  --repository-name emojifier-agent \
+  --repository-name dessertifier-agent \
   --region us-east-1 \
   --force
 ```
@@ -360,7 +366,7 @@ aws ecr describe-repositories \
   --query 'repositories[].repositoryName' 2>/dev/null
 ```
 
-Neither should contain anything starting with `emojifier`.
+Neither should contain anything starting with `dessertifier`.
 
 ---
 
@@ -368,9 +374,9 @@ Neither should contain anything starting with `emojifier`.
 
 Pick one, get it working, share with the class:
 
-1. **Add a second tool.** Write `@tool def sweetness_score(text: str) -> int`
-   returning 1–10, and update the system prompt so the agent includes the score
-   in the title.
+1. **Add a second tool.** Write `@tool def sweetness_score(recipe: str) -> int`
+   returning 1–10 based on sugar/chocolate/cream/honey mentions, and update the
+   system prompt so the agent must also hit a minimum sweetness before returning.
 2. **Swap the model.** `main.tf` passes `MODEL_ID` as an env var to the
    container, and the `model_id` Terraform variable controls it. Try
    `terraform apply -var 'model_id=us.anthropic.claude-sonnet-4-5-20250929-v1:0'`
@@ -378,13 +384,14 @@ Pick one, get it working, share with the class:
 3. **Stream responses.** FastAPI supports `StreamingResponse`; Strands supports
    `agent.stream_async(...)`. Change the invoke script to print tokens as they
    arrive.
-4. **Add AgentCore Memory.** Remember every text the user has ever emojified
-   and use their previous emoji choices as context. See the
+4. **Add AgentCore Memory.** Remember every dish the user has ever dessertified
+   and use their history to bias toward a preferred dessert style (custardy,
+   frozen, chocolate-heavy, etc.). See the
    [AgentCore Memory docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html).
-5. **Add a second toy agent.** A `Dejargonizer` (rewrites corporate-speak into
-   plain English, tool: `jargon_density(text)`, loop until below threshold).
-   Same pattern, ten minutes. Second Docker image, second runtime resource in
-   Terraform.
+5. **Add a second toy agent.** An `Emojifier` (rewrites text to contain
+   exactly N emojis, tool: `count_emojis(text)`, loop until the count is
+   exact). Same pattern, ten minutes. Second Docker image, second runtime
+   resource in Terraform.
 
 ---
 

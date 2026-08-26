@@ -7,13 +7,13 @@ variable "region" {
 variable "name" {
   description = "Base name used for the IAM role and AgentCore runtime. AgentCore runtime names must match [a-zA-Z][a-zA-Z0-9_]{0,47}, so no hyphens."
   type        = string
-  default     = "emojifier_agent"
+  default     = "dessertifier_agent"
 }
 
 variable "ecr_repository_name" {
   description = "Existing ECR repo that holds the agent image. Create it with `aws ecr create-repository` before `terraform apply`."
   type        = string
-  default     = "emojifier-agent"
+  default     = "dessertifier-agent"
 }
 
 variable "image_tag" {
