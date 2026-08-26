@@ -286,22 +286,6 @@ Troubleshooting:
 - **`NoCredentialsError`** — `aws configure` didn't take; check `~/.aws/credentials`.
 - **Port 8080 in use** — `lsof -ti:8080 | xargs kill`.
 
-### Poke at it more
-
-```bash
-for dish in "caesar salad" "bbq ribs" "beef bourguignon" "pad thai"; do
-  curl -s -X POST http://localhost:8080/invocations \
-    -H 'Content-Type: application/json' \
-    -d "{\"message\": \"give me a $dish dessert\", \"session_id\": \"tour-$RANDOM\"}" \
-    | jq '{iterations: [.iterations[] | {tool, out: .output}], reply}'
-  echo "---"
-done
-```
-
-Every dish gets its own fresh session so `recall` returns `[]` each time.
-Try the same loop with a fixed `session_id` after one `remember` call and
-watch `recall` return the stored facts on every dish.
-
 Kill the local server before moving on. Because we launched it with `&`, the
 easiest way is:
 
