@@ -1,24 +1,30 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# ECR repo is externally-managed (see step 2 in the README) — we just read it.
-data "aws_ecr_repository" "agent" {
-  name = var.ecr_repository_name
-}
-
-data "aws_ecr_image" "agent" {
-  repository_name = var.ecr_repository_name
-  image_tag       = var.image_tag
-}
-
 locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.region
+
+  # Both names derive from var.suffix so every workshop attendee gets their
+  # own scope inside the shared AWS account. Runtime name must match
+  # [a-zA-Z][a-zA-Z0-9_]{0,47} (no hyphens); ECR allows hyphens.
+  runtime_name        = "dessertifier_agent_${var.suffix}"
+  ecr_repository_name = "dessertifier-agent-${var.suffix}"
 
   # Pin by digest so re-pushing the same tag actually triggers a runtime update
   # on `terraform apply`. If we referenced `:latest` directly, Terraform would
   # never see a diff.
   image_uri = "${data.aws_ecr_repository.agent.repository_url}@${data.aws_ecr_image.agent.image_digest}"
+}
+
+# ECR repo is externally-managed (see step 2 in the README) — we just read it.
+data "aws_ecr_repository" "agent" {
+  name = local.ecr_repository_name
+}
+
+data "aws_ecr_image" "agent" {
+  repository_name = local.ecr_repository_name
+  image_tag       = var.image_tag
 }
 
 # Trust policy: only the AgentCore service can assume this role, and only for
@@ -44,7 +50,7 @@ data "aws_iam_policy_document" "assume" {
 }
 
 resource "aws_iam_role" "runtime" {
-  name               = "${var.name}-runtime"
+  name               = "${local.runtime_name}-runtime"
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 
@@ -107,7 +113,7 @@ resource "aws_iam_role_policy" "runtime" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "agent" {
-  agent_runtime_name = var.name
+  agent_runtime_name = local.runtime_name
   role_arn           = aws_iam_role.runtime.arn
 
   agent_runtime_artifact {

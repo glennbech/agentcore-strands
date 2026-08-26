@@ -87,7 +87,20 @@ Before you touch anything:
 
 1. **Open this repo in your Codespace.**
 
-2. **Install the AWS CLI v2.** The Codespace base image doesn't ship it. In
+2. **Pick your unique per-student suffix.** Every attendee deploys into the
+   same shared AWS account, so every ECR repo, IAM role, and AgentCore
+   runtime is scoped by a per-student suffix. Pick your initials plus
+   something distinctive — letters, digits, or underscores only, no hyphens,
+   max 16 chars. Then export it in your shell so every command below picks
+   it up:
+   ```bash
+   export SUFFIX=gb42              # your initials + something clever
+   export TF_VAR_suffix=$SUFFIX    # Terraform reads TF_VAR_* automatically
+   ```
+   Every `${SUFFIX}` in this doc expands to the value you just set. If you
+   open a fresh terminal, re-export both variables.
+
+3. **Install the AWS CLI v2.** The Codespace base image doesn't ship it. In
    the Codespace terminal:
    ```bash
    cd /tmp
@@ -100,13 +113,13 @@ Before you touch anything:
    aws --version    # aws-cli/2.x.x
    ```
 
-3. **Configure AWS credentials.**
+4. **Configure AWS credentials.**
    ```bash
    aws configure                     # region: us-east-1 is safest for Bedrock
    aws sts get-caller-identity       # sanity check
    ```
 
-4. **Sanity-check the rest of the toolchain** (all preinstalled by the
+5. **Sanity-check the rest of the toolchain** (all preinstalled by the
    devcontainer):
    ```bash
    docker buildx version    # buildx (for ARM64 builds)
@@ -234,14 +247,14 @@ an image (and before Terraform can look it up).
 
 ```bash
 aws ecr create-repository \
-  --repository-name dessertifier-agent \
+  --repository-name dessertifier-agent-${SUFFIX} \
   --region us-east-1
 ```
 
 Confirm:
 
 ```bash
-aws ecr describe-repositories --repository-names dessertifier-agent \
+aws ecr describe-repositories --repository-names dessertifier-agent-${SUFFIX} \
   --region us-east-1 \
   --query 'repositories[0].repositoryUri' --output text
 ```
@@ -260,9 +273,12 @@ aws ecr describe-repositories --repository-names dessertifier-agent \
 so we use `docker buildx` with QEMU emulation. The first build is slow (~3–5 min
 because layers are cold); subsequent ones are fast.
 
+The build script reads `REPO_NAME` from the environment; point it at your
+per-student ECR repo before running:
+
 ```bash
 cd ..
-./scripts/build-and-push.sh
+REPO_NAME=dessertifier-agent-${SUFFIX} ./scripts/build-and-push.sh
 ```
 
 The script:
@@ -273,7 +289,7 @@ The script:
 Verify the image made it:
 
 ```bash
-aws ecr list-images --repository-name dessertifier-agent --region us-east-1
+aws ecr list-images --repository-name dessertifier-agent-${SUFFIX} --region us-east-1
 ```
 
 You'll actually see **three** digests: the manifest list (which is what
@@ -335,7 +351,8 @@ Apply usually takes ~2 min (runtime provisioning). If it fails with
 
 - Image is x86_64 not arm64 — re-run `build-and-push.sh` after fixing.
 - Runtime role missing ECR perms — check the ECR statements in `main.tf`.
-- Runtime name collision — change `name` in `variables.tf`.
+- Runtime name collision — someone else in the workshop grabbed the same
+  `SUFFIX`; pick a new one, re-export, and re-run from Step 2.
 - **`Role validation failed ... trust policy allows assumption by this
   service`** — an IAM propagation race. The `aws` provider retries this
   internally, but if it exhausts retries just run `terraform apply` again.
@@ -399,7 +416,7 @@ Then delete the ECR repo (Terraform doesn't own it):
 
 ```bash
 aws ecr delete-repository \
-  --repository-name dessertifier-agent \
+  --repository-name dessertifier-agent-${SUFFIX} \
   --region us-east-1 \
   --force
 ```

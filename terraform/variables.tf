@@ -4,16 +4,13 @@ variable "region" {
   default     = "us-east-1"
 }
 
-variable "name" {
-  description = "Base name used for the IAM role and AgentCore runtime. AgentCore runtime names must match [a-zA-Z][a-zA-Z0-9_]{0,47}, so no hyphens."
+variable "suffix" {
+  description = "Unique per-student suffix so multiple workshop attendees can deploy into the same AWS account without name collisions. Letters/digits/underscores only (no hyphens), 1–16 chars. Use your initials plus something distinctive (e.g. 'gb42')."
   type        = string
-  default     = "dessertifier_agent"
-}
-
-variable "ecr_repository_name" {
-  description = "Existing ECR repo that holds the agent image. Create it with `aws ecr create-repository` before `terraform apply`."
-  type        = string
-  default     = "dessertifier-agent"
+  validation {
+    condition     = can(regex("^[a-zA-Z][a-zA-Z0-9_]{0,15}$", var.suffix))
+    error_message = "suffix must start with a letter and contain only letters, digits, or underscores (max 16 chars total)."
+  }
 }
 
 variable "image_tag" {
