@@ -286,12 +286,12 @@ aws ecr describe-repositories --repository-names dessertifier-agent-${SUFFIX} \
 so we use `docker buildx` with QEMU emulation. The first build is slow (~3–5 min
 because layers are cold); subsequent ones are fast.
 
-The build script reads `REPO_NAME` from the environment; point it at your
-per-student ECR repo before running:
+The build script reads your exported `SUFFIX` and pushes to
+`dessertifier-agent-${SUFFIX}`:
 
 ```bash
 cd ..
-REPO_NAME=dessertifier-agent-${SUFFIX} ./scripts/build-and-push.sh
+./scripts/build-and-push.sh
 ```
 
 The script:

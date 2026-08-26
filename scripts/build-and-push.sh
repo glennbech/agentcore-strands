@@ -3,8 +3,9 @@
 # it to ECR. Uses buildx with QEMU emulation because Codespaces are x86_64.
 set -euo pipefail
 
+: "${SUFFIX:?SUFFIX must be set — export your per-student suffix first (e.g. export SUFFIX=gb42)}"
 REGION="${AWS_REGION:-us-east-1}"
-REPO_NAME="${REPO_NAME:-dessertifier-agent}"
+REPO_NAME="${REPO_NAME:-dessertifier-agent-${SUFFIX}}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
