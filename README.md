@@ -5,11 +5,18 @@ ingredient still intact. Anchovies stay anchovies, BBQ sauce stays BBQ sauce;
 they just get candied, whipped, or folded into meringue. The results are
 absurd on purpose.
 
-The interesting bit: the model will happily *claim* it kept every ingredient
-and then quietly drop the unpleasant ones. To force it to actually keep them,
-the agent has to loop: draft a recipe, ask a tool which ingredients are still
-present, add back whatever's missing, check again, done. That's a real agent
-loop in about 60 lines of Python.
+The interesting bits — both visible in the response so you can literally
+watch them happen:
+
+1. **A tool loop that keeps the model honest.** The model will happily
+   claim it kept every ingredient and then quietly drop the unpleasant
+   ones. A `check_ingredients` tool tells the ground truth back to the
+   model, which redrafts and re-checks until nothing is missing.
+2. **Session-scoped memory the agent uses on its own.** `remember` and
+   `recall` tools let the agent build up a per-conversation memory of your
+   preferences and allergies. Same session → same memory across turns.
+   Different session → nothing recalled. That's an agent living inside a
+   specific container, not a prompt.
 
 The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
 agent to AWS in about an hour.**
@@ -31,7 +38,7 @@ so nothing feels like magic.
   `Agent(model=..., system_prompt=..., tools=[...])` and Strands runs the
   agent loop for you: call the model → run whichever tools the model asked
   for → feed results back → repeat until the model returns a final answer.
-  This is how the agent logic fits in 30 lines instead of 300.
+  This is how the agent logic fits in dozens of lines instead of hundreds.
 
 ### The plumbing around the brain
 
@@ -151,37 +158,50 @@ Before you touch anything:
 ```mermaid
 flowchart LR
     Client["Your laptop / CI<br/>(boto3 client)"]
-    subgraph Runtime["AgentCore Runtime (serverless container)"]
+    subgraph Runtime["AgentCore Runtime (session-routed containers)"]
         direction TB
         subgraph Container["your container"]
             direction TB
             FastAPI["FastAPI<br/>GET /ping<br/>POST /invocations"]
-            Strands["Strands Agent"]
+            Strands["Strands Agent<br/>(one per session_id)"]
+            Memory[("session memory<br/>{session_id → facts}")]
             FastAPI --> Strands
+            Strands <-.-> Memory
         end
     end
     Bedrock["Bedrock<br/>Claude Haiku"]
-    Client -- "invoke_agent_runtime" --> FastAPI
+    Client -- "invoke_agent_runtime<br/>+ runtimeSessionId" --> FastAPI
     Strands -- "InvokeModel" --> Bedrock
 ```
 
 Your container just needs to speak HTTP on `POST /invocations` and `GET /ping`.
-Everything else — TLS, auth, logging, autoscaling — is AgentCore's problem.
-We use **FastAPI** for those two endpoints and **Strands** as the agent brain
-behind them.
+Everything else — TLS, auth, logging, autoscaling, session-based routing —
+is AgentCore's problem. We use **FastAPI** for those two endpoints and
+**Strands** as the agent brain behind them. Session state (one `Agent`
+plus a facts list per `session_id`) lives in the container's memory
+because AgentCore always routes the same session id to the same container.
 
 ---
 
 ## Step 1 — Build the agent locally (20 min)
 
-The whole agent is in [`agent/app.py`](agent/app.py). Read it — it's under 60
-lines. The important bits:
+The whole agent is in [`agent/app.py`](agent/app.py). Read it — it's around
+150 lines, most of which are docstrings and the system prompt. The important
+bits:
 
 - `FastAPI()` with two routes: `GET /ping` (health check) and `POST /invocations`
   (the actual work). These are the two routes AgentCore requires.
-- `Agent(model=..., system_prompt=..., tools=[...])` — the Strands agent object.
+- `Agent(model=..., system_prompt=..., tools=[...])` — the Strands agent
+  object. The tool loop lives inside it.
 - `@tool` — decorator that exposes a plain Python function to the LLM. The
   docstring is what the model sees when deciding whether to call the tool.
+- `_sessions: dict[str, Agent]` + `_session_memory: dict[str, list[str]]` —
+  the per-session state. On each request we `setdefault` an Agent for the
+  incoming `session_id`. Different session id → different Agent → different
+  memory.
+- `_make_session_tools(session_id)` — builds `remember` and `recall` as
+  closures over the session's memory list, so each Agent gets tools that
+  can only see its own session's facts.
 
 ### Run it locally
 
@@ -354,7 +374,7 @@ Now Terraform can reference an image that actually exists.
 
 ```bash
 cd terraform
-terraform init     # first init downloads ~1 GB of providers; grab a coffee
+terraform init     # pulls the aws provider (a few hundred MB) on first run
 terraform apply
 ```
 
@@ -459,21 +479,22 @@ over a per-session memory list. Different `session_id` → different Agent
 
 ```
 you > I am allergic to nuts and I hate coconut
-[agent loop]
+[agent loop: 2 tool call(s)]
   1. remember → remembered: allergic to nuts
   2. remember → remembered: dislikes coconut
-Noted.
+Noted — I'll avoid nuts and coconut in every recipe this session.
 
 you > pizza
-[agent loop]
+[agent loop: 2 tool call(s)]
   1. recall → recalled 2 fact(s): ['allergic to nuts', 'dislikes coconut']
   2. check_ingredients → all present ✓
 Pizza Dessert
-Ingredients: (no nuts, no coconut, all pizza ingredients present)
+Ingredients:
+- (no nuts, no coconut, all pizza ingredients present)
 ...
 
 you > now do bbq ribs
-[agent loop]
+[agent loop: 2 tool call(s)]
   1. recall → recalled 2 fact(s): [...]     ← same session, same memory
   2. check_ingredients → all present ✓
 ```
@@ -530,10 +551,13 @@ Pick one, get it working, share with the class:
 3. **Stream responses.** FastAPI supports `StreamingResponse`; Strands supports
    `agent.stream_async(...)`. Change the invoke script to print tokens as they
    arrive.
-4. **Add AgentCore Memory.** Remember every dish the user has ever dessertified
-   and use their history to bias toward a preferred dessert style (custardy,
-   frozen, chocolate-heavy, etc.). See the
-   [AgentCore Memory docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html).
+4. **Persist memory across sessions with AgentCore Memory.** Right now
+   `remember`/`recall` are container-local: memory dies when the container
+   recycles, and a new session on a different container starts blank. The
+   [AgentCore Memory service](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
+   externalizes that state so a user's preferences survive across sessions,
+   containers, and days. Wire it into `remember`/`recall` and key by user
+   id instead of session id.
 5. **Add a second toy agent.** An `Emojifier` (rewrites text to contain
    exactly N emojis, tool: `count_emojis(text)`, loop until the count is
    exact). Same pattern, ten minutes. Second Docker image, second runtime
