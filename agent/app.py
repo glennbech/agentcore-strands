@@ -13,10 +13,15 @@ prompt.
 Exposes the two HTTP endpoints AgentCore Runtime requires:
 
   GET  /ping          → health check
-  POST /invocations   → body {"dish": "pizza"}
-                        → {"dish", "recipe", "iterations": [{tool, input, output}, ...]}
+  POST /invocations   → body:
+                          - {"dish": "pizza"}                    # single-shot
+                          - {"message": "...", "session_id": ""} # multi-turn chat
+                        → {"recipe", "iterations": [{tool, input, output}, ...]}
 
 `iterations` surfaces the agent's tool-call loop so callers can see it work.
+Multi-turn mode keeps one Agent per session_id in memory — AgentCore's
+session-based routing sends every turn for a given runtimeSessionId to the
+same container, so the Agent's message history carries across turns.
 """
 
 import os
@@ -68,9 +73,11 @@ Procedure:
 
 
 # Model is expensive-ish to construct (initializes a boto3 client); the Agent
-# wrapping it is cheap. Build one Agent per request so `agent.messages` is a
-# clean per-invocation trace we can serialize back to the caller.
+# wrapping it is cheap. Single-shot requests build a fresh Agent per call so
+# agent.messages is a clean per-invocation trace; chat requests keep one
+# Agent per session_id so message history carries across turns.
 _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+_sessions: dict[str, Agent] = {}
 
 
 def _new_agent() -> Agent:
@@ -116,14 +123,27 @@ def ping():
 async def invoke(request: Request):
     body = await request.json()
     dish = body.get("dish")
-    if not dish:
-        return JSONResponse(
-            {"error": "payload must include 'dish' (string)"},
-            status_code=400,
-        )
+    message = body.get("message")
+    session_id = body.get("session_id")
 
-    agent = _new_agent()
-    prompt = f"Give me a dessert version of: {dish}"
-    result = str(agent(prompt)).strip()
-    iterations = _extract_iterations(agent.messages)
-    return JSONResponse({"dish": dish, "recipe": result, "iterations": iterations})
+    if message and session_id:
+        # Multi-turn: reuse the Agent across calls so it remembers the
+        # conversation. Snapshot messages length so we only report tool
+        # calls made THIS turn.
+        agent = _sessions.setdefault(session_id, _new_agent())
+        before = len(agent.messages)
+        result = str(agent(message)).strip()
+        iterations = _extract_iterations(agent.messages[before:])
+        return JSONResponse({"recipe": result, "iterations": iterations})
+
+    if dish:
+        agent = _new_agent()
+        prompt = f"Give me a dessert version of: {dish}"
+        result = str(agent(prompt)).strip()
+        iterations = _extract_iterations(agent.messages)
+        return JSONResponse({"dish": dish, "recipe": result, "iterations": iterations})
+
+    return JSONResponse(
+        {"error": "payload must include either 'dish' (string) or both 'message' and 'session_id' (strings)"},
+        status_code=400,
+    )

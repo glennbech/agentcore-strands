@@ -418,6 +418,37 @@ You'll see the FastAPI request line, the Strands model call, the tool
 invocation, and the response — the exact same log stream you'd get running it
 locally, just on someone else's box.
 
+### Chat with the agent (multi-turn)
+
+`invoke.py` sends one shot and exits. To have an actual conversation — where
+the agent remembers what it just made and you can iterate on it — use:
+
+```bash
+python3 scripts/recipechat.py
+```
+
+AgentCore routes every turn for the same `runtimeSessionId` to the same
+container instance, so the container keeps one Strands `Agent` alive per
+session. The `Agent`'s message history carries across turns, meaning you
+can say:
+
+```
+you > pizza
+[agent loop + Pizza Dessert recipe]
+
+you > make it more caramelly, and add pistachio
+[agent loop + revised recipe with more caramel and pistachio, still every
+ pizza ingredient present]
+
+you > now do bbq ribs
+[agent loop + BBQ Ribs Dessert recipe, fresh conversation on the same session]
+```
+
+Under the hood the payload is `{"message": "...", "session_id": "..."}`
+instead of `{"dish": "..."}`, and the container `setdefault`s an `Agent` in
+a dict keyed by session_id. This is real chat with an agent, not a
+sequence of independent single-shot calls.
+
 ---
 
 ## Step 6 — Clean up (5 min) **DO NOT SKIP**
@@ -492,7 +523,8 @@ Pick one, get it working, share with the class:
 │   └── outputs.tf
 ├── scripts/
 │   ├── build-and-push.sh       # buildx → ECR
-│   └── invoke.py               # boto3 call to the deployed runtime
+│   ├── invoke.py               # single-shot boto3 call to the deployed runtime
+│   └── recipechat.py           # multi-turn REPL (same runtime, session-persistent)
 └── .gitignore
 ```
 
