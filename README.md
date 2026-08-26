@@ -5,18 +5,12 @@ ingredient still intact. Anchovies stay anchovies, BBQ sauce stays BBQ sauce;
 they just get candied, whipped, or folded into meringue. The results are
 absurd on purpose.
 
-The interesting bits — both visible in the response so you can literally
-watch them happen:
-
-1. **A tool loop that keeps the model honest.** The model will happily
-   claim it kept every ingredient and then quietly drop the unpleasant
-   ones. A `check_ingredients` tool tells the ground truth back to the
-   model, which redrafts and re-checks until nothing is missing.
-2. **Session-scoped memory the agent uses on its own.** `remember` and
-   `recall` tools let the agent build up a per-conversation memory of your
-   preferences and allergies. Same session → same memory across turns.
-   Different session → nothing recalled. That's an agent living inside a
-   specific container, not a prompt.
+The interesting bit — visible in the response so you can literally watch
+it happen: **the agent has session-scoped memory it uses on its own.**
+`remember` and `recall` tools let it build up a per-conversation memory of
+your preferences and allergies. Same session → same memory across turns.
+Different session → nothing recalled. That's an agent living inside a
+specific container, not a prompt.
 
 The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
 agent to AWS in about an hour.**
@@ -186,13 +180,13 @@ because AgentCore always routes the same session id to the same container.
 ## Step 1 — Build the agent locally (20 min)
 
 The whole agent is in [`agent/app.py`](agent/app.py). Read it — it's around
-150 lines, most of which are docstrings and the system prompt. The important
+130 lines, most of which are docstrings and the system prompt. The important
 bits:
 
 - `FastAPI()` with two routes: `GET /ping` (health check) and `POST /invocations`
   (the actual work). These are the two routes AgentCore requires.
 - `Agent(model=..., system_prompt=..., tools=[...])` — the Strands agent
-  object. The tool loop lives inside it.
+  object. Strands runs the tool loop inside it.
 - `@tool` — decorator that exposes a plain Python function to the LLM. The
   docstring is what the model sees when deciding whether to call the tool.
 - `_sessions: dict[str, Agent]` + `_session_memory: dict[str, list[str]]` —
@@ -229,20 +223,14 @@ what it asked, what the tool answered. Skim it:
 {
   "reply": "Pizza Dessert\nIngredients:\n- ...",
   "iterations": [
-    {"tool": "recall",            "input": {}, "output": []},
-    {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": ["anchovy"]}},
-    {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": []}}
+    {"tool": "recall", "input": {}, "output": []}
   ]
 }
 ```
 
-That array *is* the agent loop. The model called `recall` first (empty, no
-memory yet), drafted the recipe, `check_ingredients` said "you dropped
-anchovy", the model redrafted, `check_ingredients` said "all present", the
-model returned the reply. This is the difference between an agent and a
-single LLM call.
-
-Now try session memory. Send two messages on the same `session_id`:
+The model chose to call `recall` before answering, saw the session had no
+remembered facts, then wrote the recipe. Now let's give it something to
+remember. Send two messages on the same `session_id`:
 
 ```bash
 # Turn 1: tell it something
@@ -287,15 +275,14 @@ for dish in "caesar salad" "bbq ribs" "beef bourguignon" "pad thai"; do
   curl -s -X POST http://localhost:8080/invocations \
     -H 'Content-Type: application/json' \
     -d "{\"message\": \"give me a $dish dessert\", \"session_id\": \"tour-$RANDOM\"}" \
-    | jq '{iterations: [.iterations[] | {tool, out: (.output.missing // .output)}], reply}'
+    | jq '{iterations: [.iterations[] | {tool, out: .output}], reply}'
   echo "---"
 done
 ```
 
-Different dishes hit different loop depths — a dish with obvious dessert
-analogues (bread, sugar-friendly veg) often converges in one call; something
-like `caesar salad` with anchovy and parmesan takes a couple of iterations
-before the model gets everything back in. You're watching the agent think.
+Every dish gets its own fresh session so `recall` returns `[]` each time.
+Try the same loop with a fixed `session_id` after one `remember` call and
+watch `recall` return the stored facts on every dish.
 
 Kill the local server before moving on. Because we launched it with `&`, the
 easiest way is:
@@ -428,11 +415,9 @@ It prints the agent loop to stderr before the reply — one line per tool
 call — so you can see the agent working, e.g.:
 
 ```
-Agent loop — 4 tool call(s):
+Agent loop — 2 tool call(s):
   1. remember → remembered: allergic to nuts
   2. recall → recalled 1 fact(s): ['allergic to nuts']
-  3. check_ingredients → missing: ['pearl onions']
-  4. check_ingredients → all present ✓
 
 Beef Bourguignon Dessert
 Ingredients:
@@ -485,18 +470,16 @@ you > I am allergic to nuts and I hate coconut
 Noted — I'll avoid nuts and coconut in every recipe this session.
 
 you > pizza
-[agent loop: 2 tool call(s)]
+[agent loop: 1 tool call(s)]
   1. recall → recalled 2 fact(s): ['allergic to nuts', 'dislikes coconut']
-  2. check_ingredients → all present ✓
 Pizza Dessert
 Ingredients:
 - (no nuts, no coconut, all pizza ingredients present)
 ...
 
 you > now do bbq ribs
-[agent loop: 2 tool call(s)]
+[agent loop: 1 tool call(s)]
   1. recall → recalled 2 fact(s): [...]     ← same session, same memory
-  2. check_ingredients → all present ✓
 ```
 
 Open a second `recipechat.py` in another terminal and ask for the same
@@ -541,9 +524,14 @@ Neither should contain anything starting with `dessertifier`.
 
 Pick one, get it working, share with the class:
 
-1. **Add a second tool.** Write `@tool def sweetness_score(recipe: str) -> int`
-   returning 1–10 based on sugar/chocolate/cream/honey mentions, and update the
-   system prompt so the agent must also hit a minimum sweetness before returning.
+1. **Add a verification-loop tool.** Right now the model tries to keep every
+   savory ingredient in the dessert version but nothing enforces it — it
+   often quietly drops the unpleasant ones. Write `@tool def
+   check_ingredients(recipe: str, ingredients: list[str])` that returns
+   which ingredients from the savory original are missing from the recipe,
+   and update the system prompt so the agent must call it and loop until
+   nothing is missing. Watch the `iterations` array grow. This is the
+   classic "tool tells ground truth, agent iterates" pattern.
 2. **Swap the model.** `main.tf` passes `MODEL_ID` as an env var to the
    container, and the `model_id` Terraform variable controls it. Try
    `terraform apply -var 'model_id=us.anthropic.claude-sonnet-4-5-20250929-v1:0'`

@@ -15,10 +15,6 @@ The agent is *conversational and stateful*, not a text-in/text-out endpoint:
     - `recall()` returns everything the session has been told to remember.
   Because they show up in the returned `iterations` list, students can
   literally watch the agent write to and read from session memory.
-- A third tool, `check_ingredients(recipe, ingredients)`, is the
-  ground-truth loop that forces the model to actually keep every original
-  ingredient (it will happily claim to and then quietly drop the
-  unpleasant ones without the tool holding it accountable).
 
 Exposes the two HTTP endpoints AgentCore Runtime requires:
 
@@ -41,25 +37,13 @@ MODEL_ID = os.environ.get(
 )
 
 
-@tool
-def check_ingredients(recipe: str, ingredients: list[str]) -> dict:
-    """Given a candidate dessert recipe and the list of ingredients from the
-    ORIGINAL savory dish that must all still appear, return which are present
-    and which are missing. Case-insensitive substring match. Use this as
-    ground truth — do not trust your own scan of the recipe."""
-    lower = recipe.lower()
-    present = [i for i in ingredients if i.lower() in lower]
-    missing = [i for i in ingredients if i.lower() not in lower]
-    return {"present": present, "missing": missing}
-
-
 SYSTEM_PROMPT = """You are Dessertifier. You chat with the user about savory
-dishes and reply with DESSERT versions of them. The twist: every core
-ingredient of the original savory dish MUST appear in your dessert version.
-Tomatoes stay tomatoes. Anchovies stay anchovies. BBQ sauce stays BBQ sauce.
-Ground beef stays ground beef. You may candy, whip, chocolate-dip,
-caramelize, fold into custard, layer with meringue, or otherwise coax them
-into dessert form — but do not substitute them away. Lean into the absurdity.
+dishes and reply with DESSERT versions of them. Every core ingredient of the
+original savory dish should appear in your dessert version. Tomatoes stay
+tomatoes. Anchovies stay anchovies. BBQ sauce stays BBQ sauce. Ground beef
+stays ground beef. You may candy, whip, chocolate-dip, caramelize, fold into
+custard, layer with meringue, or otherwise coax them into dessert form — but
+do not substitute them away. Lean into the absurdity.
 
 You have session-scoped memory via two tools:
 - `remember(fact)`: whenever the user shares a preference, allergy, dislike,
@@ -71,17 +55,9 @@ You have session-scoped memory via two tools:
 
 Procedure when the user names a dish:
 1. Call `recall()` to load session memory.
-2. List 5–10 core ingredients of the ORIGINAL savory dish (skipping/replacing
-   anything memory tells you the user won't eat).
-3. Draft a recipe titled "<Dish> Dessert" with two sections: Ingredients
-   (list) and Method (numbered steps). Every ingredient from step 2 must
-   appear literally in the Ingredients list of your draft.
-4. Call `check_ingredients(recipe=<your full draft>, ingredients=<list from step 2>)`
-   to verify. The tool is ground truth; your own scan is not.
-5. If anything is missing, rewrite to include it in a dessert-appropriate
-   way, then check again. Loop until nothing is missing.
-6. Output only the final recipe — title, Ingredients section, Method
-   section. No preamble, no tool trace, no meta commentary.
+2. Reply with a recipe titled "<Dish> Dessert" with two sections: Ingredients
+   (every core ingredient of the savory original, minus anything memory says
+   to avoid) and Method (numbered steps). No preamble, no meta commentary.
 
 When the user asks to revise a prior recipe ("more caramelly", "add
 pistachio"), output the full revised recipe under the same rules.
@@ -120,7 +96,7 @@ def _make_session_tools(session_id: str) -> list:
         """Return every fact this session has been told to remember."""
         return list(memory)
 
-    return [check_ingredients, remember, recall]
+    return [remember, recall]
 
 
 def _new_agent(session_id: str) -> Agent:

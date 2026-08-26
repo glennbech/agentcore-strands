@@ -38,9 +38,6 @@ def pad_session(name: str) -> str:
 
 
 def format_iteration(tool: str, output) -> str:
-    if tool == "check_ingredients" and isinstance(output, dict) and "missing" in output:
-        missing = output["missing"]
-        return "all present ✓" if not missing else f"missing: {missing}"
     if tool == "remember":
         return str(output)
     if tool == "recall":
