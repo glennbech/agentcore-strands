@@ -365,6 +365,14 @@ aws ecr list-images --repository-name dessertifier-agent-${SUFFIX} --region us-e
 
 Now Terraform can reference an image that actually exists.
 
+Open [`terraform/main.tf`](terraform/main.tf) and skim it before you apply.
+Even if you've never written Terraform, the shapes should look familiar:
+there's an IAM role with a trust policy and a policy document with SIDs
+(ECR pull, CloudWatch Logs, `bedrock:InvokeModel`, memory access), an ECR
+image lookup, and an AgentCore Runtime + AgentCore Memory resource. It's
+the same AWS you already know — just described in HCL instead of clicked
+into the console.
+
 ```bash
 cd terraform
 terraform init     # pulls the aws provider (a few hundred MB) on first run
