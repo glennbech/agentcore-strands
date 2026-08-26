@@ -3,18 +3,20 @@ with dessert versions that keep every original ingredient intact. Anchovies
 stay anchovies, BBQ sauce stays BBQ sauce; they just get candied, whipped,
 or folded into meringue. The result is meant to be absurd.
 
-The agent is *conversational and stateful*, not a text-in/text-out endpoint:
+The agent is *conversational and stateful*, but the durable state lives in
+**AgentCore Memory**, not in this container. That distinction matters:
 
 - Every request carries a `session_id`. AgentCore Runtime routes all
   requests for the same session to the same container instance, so the
-  Strands `Agent` object stays alive across turns and remembers what was
-  said. Different `session_id` → different Agent → different memory.
-- Two session-scoped tools make that memory *visible*:
-    - `remember(fact)` persists a fact for the rest of the session
-      (preferences, allergies, dislikes).
-    - `recall()` returns everything the session has been told to remember.
-  Because they show up in the returned `iterations` list, students can
-  literally watch the agent write to and read from session memory.
+  Strands `Agent` object (with its in-flight message history) can stay
+  alive across a chat's turns.
+- The user's *facts* (allergies, dislikes, style choices) go through two
+  session-scoped tools: `remember(fact)` writes a `CreateEvent` to
+  AgentCore Memory keyed by session_id; `recall()` reads them back via
+  `ListEvents`. When the container recycles, the Strands Agent is
+  reconstructed, but every remembered fact survives.
+- Because the tools appear in the returned `iterations` list, students
+  can literally watch the agent write to and read from AgentCore Memory.
 
 Exposes the two HTTP endpoints AgentCore Runtime requires:
 
@@ -24,7 +26,9 @@ Exposes the two HTTP endpoints AgentCore Runtime requires:
 """
 
 import os
+from datetime import datetime, timezone
 
+import boto3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from strands import Agent, tool
@@ -35,6 +39,7 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 MODEL_ID = os.environ.get(
     "MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 )
+MEMORY_ID = os.environ.get("MEMORY_ID")  # injected by Terraform
 
 
 SYSTEM_PROMPT = """You are Dessertifier. You chat with the user about savory
@@ -68,33 +73,72 @@ appropriate.
 """
 
 
-# Model is expensive-ish to construct (initializes a boto3 client); Agents
-# wrapping it are cheap. We keep one Agent per session_id so its message
-# history — plus its session-scoped remember/recall closure — carries across
-# turns for the same runtimeSessionId.
+# The BedrockModel wraps a boto3 client (expensive-ish to construct). Agents
+# wrapping it are cheap. We keep one Agent per session_id for the *current
+# conversation's* in-flight message history — that's ephemeral. Durable facts
+# live in AgentCore Memory, retrieved through remember/recall.
 _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+_memory = boto3.client("bedrock-agentcore", region_name=REGION)
 _sessions: dict[str, Agent] = {}
-_session_memory: dict[str, list[str]] = {}
+
+# Local-dev fallback: if MEMORY_ID is unset (e.g. `uvicorn app:app` on a
+# laptop with no memory resource provisioned), keep facts in a plain dict so
+# the workshop's Step 1 local test still exercises remember/recall. In the
+# deployed runtime MEMORY_ID is always set by Terraform.
+_local_facts: dict[str, list[str]] = {}
+
+
+def _remember_fact(session_id: str, fact: str) -> None:
+    if not MEMORY_ID:
+        _local_facts.setdefault(session_id, []).append(fact)
+        return
+    _memory.create_event(
+        memoryId=MEMORY_ID,
+        actorId=session_id,
+        sessionId=session_id,
+        eventTimestamp=datetime.now(timezone.utc),
+        payload=[{"conversational": {"role": "USER", "content": {"text": fact}}}],
+    )
+
+
+def _recall_facts(session_id: str) -> list[str]:
+    if not MEMORY_ID:
+        return list(_local_facts.get(session_id, []))
+    resp = _memory.list_events(
+        memoryId=MEMORY_ID,
+        actorId=session_id,
+        sessionId=session_id,
+        includePayloads=True,
+        maxResults=100,
+    )
+    facts: list[str] = []
+    for event in resp.get("events", []):
+        for item in event.get("payload", []) or []:
+            conv = item.get("conversational")
+            if conv:
+                text = (conv.get("content") or {}).get("text")
+                if text:
+                    facts.append(text)
+    return facts
 
 
 def _make_session_tools(session_id: str) -> list:
-    """Build tools whose state is scoped to this session_id via closure.
-    Different sessions get different memory lists, which is what makes the
-    'same input, different session, different result' demo work."""
-    memory = _session_memory.setdefault(session_id, [])
+    """Build tools whose calls carry the session_id via closure. Both tools
+    hit the AgentCore Memory data plane — no in-container fact storage."""
 
     @tool
     def remember(fact: str) -> str:
-        """Persist a fact for the rest of this session. Use for user
-        preferences, allergies, dislikes, or style choices you should honor
-        in every subsequent recipe this session."""
-        memory.append(fact)
+        """Persist a fact about this session's user (preference, allergy,
+        dislike, style choice) into AgentCore Memory. It survives container
+        recycles and is retrievable via `recall` for the rest of the session."""
+        _remember_fact(session_id, fact)
         return f"remembered: {fact}"
 
     @tool
     def recall() -> list[str]:
-        """Return every fact this session has been told to remember."""
-        return list(memory)
+        """Return every fact this session has stored via `remember`, pulled
+        from AgentCore Memory."""
+        return _recall_facts(session_id)
 
     return [remember, recall]
 

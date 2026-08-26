@@ -27,6 +27,16 @@ data "aws_ecr_image" "agent" {
   image_tag       = var.image_tag
 }
 
+# AgentCore Memory: externalized session facts store. The container's
+# remember/recall tools call create_event / list_events against this
+# resource, keyed by session_id. Facts survive container recycles and
+# scale-out — the container itself stays effectively stateless w.r.t.
+# durable state.
+resource "aws_bedrockagentcore_memory" "sessions" {
+  name                  = "dessertifier_memory_${var.suffix}"
+  event_expiry_duration = 7
+}
+
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -93,6 +103,17 @@ data "aws_iam_policy_document" "runtime" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid    = "Memory"
+    effect = "Allow"
+    actions = [
+      "bedrock-agentcore:CreateEvent",
+      "bedrock-agentcore:ListEvents",
+      "bedrock-agentcore:GetEvent",
+    ]
+    resources = [aws_bedrockagentcore_memory.sessions.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {
@@ -114,10 +135,12 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
     network_mode = "PUBLIC"
   }
 
-  # Container reads MODEL_ID from the environment (agent/app.py). Setting it
-  # here lets you swap the model without rebuilding/re-pushing the image.
+  # Container reads MODEL_ID and MEMORY_ID from the environment (agent/app.py).
+  # Setting them here lets you swap the model or repoint at a different memory
+  # store without rebuilding/re-pushing the image.
   environment_variables = {
-    MODEL_ID = var.model_id
+    MODEL_ID  = var.model_id
+    MEMORY_ID = aws_bedrockagentcore_memory.sessions.id
   }
 
   depends_on = [

@@ -6,11 +6,12 @@ they just get candied, whipped, or folded into meringue. The results are
 absurd on purpose.
 
 The interesting bit — visible in the response so you can literally watch
-it happen: **the agent has session-scoped memory it uses on its own.**
-`remember` and `recall` tools let it build up a per-conversation memory of
-your preferences and allergies. Same session → same memory across turns.
-Different session → nothing recalled. That's an agent living inside a
-specific container, not a prompt.
+it happen: **the agent has session-scoped memory it uses on its own**,
+backed by AgentCore Memory. `remember` and `recall` tools let it build up
+a per-session memory of your preferences and allergies that survives
+container recycles and scale-out. Same session → same memory across
+turns. Different session → nothing recalled. The container itself stays
+effectively stateless w.r.t. durable state.
 
 The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
 agent to AWS in about an hour.**
@@ -64,6 +65,11 @@ so nothing feels like magic.
   logging, session routing. You never SSH into a box. The contract with your
   container is minimal: expose `POST /invocations` and `GET /ping` on port
   8080, that's it.
+- **Amazon Bedrock AgentCore Memory** — the managed durable state store
+  that goes with AgentCore Runtime. You get a `memoryId`, then use the
+  `CreateEvent` / `ListEvents` / `RetrieveMemoryRecords` APIs to persist
+  facts about a session (or user, or actor) that survive container
+  recycles and scale-out. Our `remember` and `recall` tools call into it.
 - **Terraform** (the `aws` provider) — infrastructure as code. Instead of
   clicking around the AWS console, you describe the resources you want
   (an IAM role, an AgentCore runtime, etc.) in `.tf` files and Terraform
@@ -158,22 +164,25 @@ flowchart LR
             direction TB
             FastAPI["FastAPI<br/>GET /ping<br/>POST /invocations"]
             Strands["Strands Agent<br/>(one per session_id)"]
-            Memory[("session memory<br/>{session_id → facts}")]
             FastAPI --> Strands
-            Strands <-.-> Memory
         end
     end
     Bedrock["Bedrock<br/>Claude Haiku"]
+    Memory[("AgentCore Memory<br/>facts by session_id")]
     Client -- "invoke_agent_runtime<br/>+ runtimeSessionId" --> FastAPI
     Strands -- "InvokeModel" --> Bedrock
+    Strands -- "remember / recall<br/>(CreateEvent / ListEvents)" --> Memory
 ```
 
-Your container just needs to speak HTTP on `POST /invocations` and `GET /ping`.
+Your container speaks HTTP on `POST /invocations` and `GET /ping`.
 Everything else — TLS, auth, logging, autoscaling, session-based routing —
 is AgentCore's problem. We use **FastAPI** for those two endpoints and
-**Strands** as the agent brain behind them. Session state (one `Agent`
-plus a facts list per `session_id`) lives in the container's memory
-because AgentCore always routes the same session id to the same container.
+**Strands** as the agent brain behind them. Durable state (the user's
+remembered facts per `session_id`) lives in **AgentCore Memory**, not in
+the container, so it survives idle recycles and scale events. The
+container keeps only the current chat's in-flight message history in a
+per-session `Agent` object; if the container is recycled mid-chat, only
+that ephemeral scratchpad is lost — every remembered fact is still there.
 
 ---
 
@@ -189,13 +198,19 @@ bits:
   object. Strands runs the tool loop inside it.
 - `@tool` — decorator that exposes a plain Python function to the LLM. The
   docstring is what the model sees when deciding whether to call the tool.
-- `_sessions: dict[str, Agent]` + `_session_memory: dict[str, list[str]]` —
-  the per-session state. On each request we `setdefault` an Agent for the
-  incoming `session_id`. Different session id → different Agent → different
-  memory.
+- `_memory = boto3.client("bedrock-agentcore")` — the AgentCore Memory
+  data-plane client. `MEMORY_ID` is passed in via env var by Terraform.
+- `_remember_fact` / `_recall_facts` — thin wrappers around `create_event`
+  / `list_events`, keyed by `session_id` (which we use as both `actorId`
+  and `sessionId` for the workshop). They also have a plain-dict fallback
+  for local `uvicorn` runs where `MEMORY_ID` isn't set.
 - `_make_session_tools(session_id)` — builds `remember` and `recall` as
-  closures over the session's memory list, so each Agent gets tools that
-  can only see its own session's facts.
+  closures over the current `session_id` so the model can't accidentally
+  leak facts across sessions.
+- `_sessions: dict[str, Agent]` — the container's only in-memory state:
+  the current chat's Strands Agent (with its in-flight message history).
+  Ephemeral by design — dies on container recycle, but every remembered
+  fact survives externally in AgentCore Memory.
 
 ### Run it locally
 
@@ -206,6 +221,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 uvicorn app:app --host 0.0.0.0 --port 8080 &
+# ↑ MEMORY_ID isn't set locally so remember/recall use an in-process dict
+#   fallback — enough to see the loop work. The deployed runtime (Step 4)
+#   gets MEMORY_ID from Terraform and uses real AgentCore Memory.
 
 # Give it a second to boot, then:
 curl -s http://localhost:8080/ping                    # {"status":"Healthy"}
@@ -373,6 +391,10 @@ terraform apply
   the `data.aws_ecr_image` re-reads the digest and Terraform sees a diff, which
   forces a runtime update. If you used `:latest` directly, Terraform would never
   notice.
+- **`aws_bedrockagentcore_memory.sessions`** — the durable facts store
+  the agent's `remember`/`recall` tools call into. Its `id` is injected
+  into the container as `MEMORY_ID` via `environment_variables`, and its
+  ARN is scoped in the runtime role's `Memory` IAM statement.
 - **`bedrock-agentcore:GetWorkloadAccessToken*`** — required so the runtime can
   talk to the AgentCore control plane on your behalf.
 
@@ -457,10 +479,11 @@ python3 scripts/recipechat.py
 ```
 
 AgentCore routes every turn for the same `runtimeSessionId` to the same
-container instance. The container keeps one Strands `Agent` per session,
-and each Agent has session-scoped `remember` and `recall` tools closed
-over a per-session memory list. Different `session_id` → different Agent
-→ different memory. Try:
+container instance so the current chat's Strands `Agent` (message history
+in flight) stays warm across turns. Facts you tell it go through
+`remember` → `create_event` into AgentCore Memory, keyed by `session_id`.
+Different `session_id` → different actor in AgentCore Memory → nothing
+`recall`ed. Try:
 
 ```
 you > I am allergic to nuts and I hate coconut
@@ -483,9 +506,11 @@ you > now do bbq ribs
 ```
 
 Open a second `recipechat.py` in another terminal and ask for the same
-recipes — `recall` returns `[]` because it's a fresh session. That
-contrast is the point: it's not the code that "remembers" — it's the
-session-scoped Agent living inside a specific container.
+recipes — `recall` returns `[]` because it's a fresh `session_id` and
+AgentCore Memory has no events for it. Kill and restart your first REPL
+and its `recall` still returns the original facts, even though the
+container may have handed you a new Strands `Agent`: the durable state
+lives in AgentCore Memory, not in the container.
 
 ---
 
@@ -539,13 +564,13 @@ Pick one, get it working, share with the class:
 3. **Stream responses.** FastAPI supports `StreamingResponse`; Strands supports
    `agent.stream_async(...)`. Change the invoke script to print tokens as they
    arrive.
-4. **Persist memory across sessions with AgentCore Memory.** Right now
-   `remember`/`recall` are container-local: memory dies when the container
-   recycles, and a new session on a different container starts blank. The
-   [AgentCore Memory service](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
-   externalizes that state so a user's preferences survive across sessions,
-   containers, and days. Wire it into `remember`/`recall` and key by user
-   id instead of session id.
+4. **Cross-session memory via user id.** Session memory is already in
+   AgentCore Memory but keyed by `session_id`, so switching sessions
+   wipes the recall. Add a `user_id` to the payload and use that as the
+   `actorId` in `create_event` / `list_events`. Same user across two
+   sessions will now share facts. Bonus: wire in a `USER_PREFERENCE`
+   [memory strategy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
+   so extracted preferences become semantically searchable.
 5. **Add a second toy agent.** An `Emojifier` (rewrites text to contain
    exactly N emojis, tool: `count_emojis(text)`, loop until the count is
    exact). Same pattern, ten minutes. Second Docker image, second runtime

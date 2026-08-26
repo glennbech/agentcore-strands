@@ -22,3 +22,8 @@ output "runtime_role_arn" {
   description = "IAM role the AgentCore runtime assumes."
   value       = aws_iam_role.runtime.arn
 }
+
+output "memory_id" {
+  description = "AgentCore Memory ID that remember/recall write to and read from."
+  value       = aws_bedrockagentcore_memory.sessions.id
+}
