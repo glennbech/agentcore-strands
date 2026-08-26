@@ -312,9 +312,7 @@ terraform apply
 ### While apply runs, read `main.tf`. Pay attention to:
 
 - **The trust policy** on `aws_iam_role.runtime` — only the AgentCore
-  service (`bedrock-agentcore.amazonaws.com`) can assume the role. Kept
-  workshop-lax on purpose; production policies add `aws:SourceAccount` /
-  `aws:SourceArn` conditions to close the confused-deputy hole.
+  service (`bedrock-agentcore.amazonaws.com`) can assume the role.
 - **The image URI** — pinned by *digest*, not tag. When you re-push a new image,
   the `data.aws_ecr_image` re-reads the digest and Terraform sees a diff, which
   forces a runtime update. If you used `:latest` directly, Terraform would never

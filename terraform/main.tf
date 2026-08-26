@@ -27,8 +27,6 @@ data "aws_ecr_image" "agent" {
   image_tag       = var.image_tag
 }
 
-# Trust policy: the AgentCore service can assume this role. Workshop-lax —
-# no source-account or source-arn conditions.
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
