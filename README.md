@@ -481,10 +481,18 @@ locally, just on someone else's box.
 The CLI form is fine for one-shot calls, but for an actual conversation —
 where the agent remembers what you told it earlier and you can iterate on
 its answer — a REPL is much friendlier. `recipechat.py` wraps the same
-`invoke-agent-runtime` call in an input loop:
+`invoke-agent-runtime` call in an input loop.
+
+Reuse the venv from Step 1 (it already has boto3), or make a fresh one:
 
 ```bash
-pip install --upgrade boto3     # need a recent version for bedrock-agentcore
+# Option A: reuse the Step 1 venv (fastest — boto3 is already there)
+source agent/.venv/bin/activate
+
+# Option B: fresh venv from the repo root
+python3 -m venv .venv && source .venv/bin/activate && pip install boto3
+
+# Then, either way:
 python3 scripts/recipechat.py
 ```
 

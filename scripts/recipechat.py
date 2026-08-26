@@ -27,7 +27,14 @@ import subprocess
 import sys
 import uuid
 
-import boto3
+try:
+    import boto3
+except ImportError:
+    sys.exit(
+        "boto3 is not installed in the current Python environment.\n"
+        "Install it with:  pip install boto3\n"
+        "(or reactivate the venv from Step 1: source agent/.venv/bin/activate)"
+    )
 
 
 def get_runtime_arn() -> str:
