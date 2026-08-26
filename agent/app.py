@@ -14,7 +14,9 @@ Exposes the two HTTP endpoints AgentCore Runtime requires:
 
   GET  /ping          → health check
   POST /invocations   → body {"dish": "pizza"}
-                        → {"dish": "...", "recipe": "..."}
+                        → {"dish", "recipe", "iterations": [{tool, input, output}, ...]}
+
+`iterations` surfaces the agent's tool-call loop so callers can see it work.
 """
 
 import os
@@ -65,11 +67,41 @@ Procedure:
 """
 
 
-agent = Agent(
-    model=BedrockModel(model_id=MODEL_ID, region_name=REGION),
-    system_prompt=SYSTEM_PROMPT,
-    tools=[check_ingredients],
-)
+# Model is expensive-ish to construct (initializes a boto3 client); the Agent
+# wrapping it is cheap. Build one Agent per request so `agent.messages` is a
+# clean per-invocation trace we can serialize back to the caller.
+_model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+
+
+def _new_agent() -> Agent:
+    return Agent(model=_model, system_prompt=SYSTEM_PROMPT, tools=[check_ingredients])
+
+
+def _extract_iterations(messages: list[dict]) -> list[dict]:
+    """Pair up toolUse blocks (assistant) with matching toolResult blocks
+    (user) to reconstruct the loop. Returns a list ordered by call, each
+    element {tool, input, output}."""
+    pending: dict[str, dict] = {}
+    iterations: list[dict] = []
+    for msg in messages:
+        for block in msg.get("content", []) or []:
+            if "toolUse" in block:
+                tu = block["toolUse"]
+                pending[tu["toolUseId"]] = {"tool": tu["name"], "input": tu.get("input", {})}
+            elif "toolResult" in block:
+                tr = block["toolResult"]
+                call = pending.pop(tr["toolUseId"], None)
+                if call is None:
+                    continue
+                outputs = []
+                for c in tr.get("content", []) or []:
+                    if "json" in c:
+                        outputs.append(c["json"])
+                    elif "text" in c:
+                        outputs.append(c["text"])
+                call["output"] = outputs[0] if len(outputs) == 1 else outputs
+                iterations.append(call)
+    return iterations
 
 
 app = FastAPI()
@@ -90,6 +122,8 @@ async def invoke(request: Request):
             status_code=400,
         )
 
+    agent = _new_agent()
     prompt = f"Give me a dessert version of: {dish}"
     result = str(agent(prompt)).strip()
-    return JSONResponse({"dish": dish, "recipe": result})
+    iterations = _extract_iterations(agent.messages)
+    return JSONResponse({"dish": dish, "recipe": result, "iterations": iterations})

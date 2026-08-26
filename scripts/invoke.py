@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Invoke the deployed AgentCore runtime.
+"""Invoke the deployed AgentCore runtime and print the agent loop.
+
+The point of this exercise is that it's an AGENT, not a single LLM call.
+This script surfaces that by printing each tool-call iteration the agent
+took before it settled on a final recipe. You'll see the model draft,
+call `check_ingredients`, get told what's missing, redraft, call again,
+and so on until the tool reports nothing missing — then the final recipe.
 
 Usage:
     python3 scripts/invoke.py "pizza"
@@ -32,6 +38,24 @@ def pad_session(name: str) -> str:
     return (name + "-" * 33)[:33] if len(name) < 33 else name
 
 
+def print_iterations(iterations: list[dict]) -> None:
+    if not iterations:
+        print("(agent returned without calling any tools)", file=sys.stderr)
+        return
+    print(f"Agent loop — {len(iterations)} tool call(s):", file=sys.stderr)
+    for i, it in enumerate(iterations, 1):
+        tool = it.get("tool", "?")
+        output = it.get("output", {})
+        # Compact per-call summary suited to check_ingredients output.
+        if isinstance(output, dict) and "missing" in output:
+            missing = output["missing"]
+            status = "all present ✓" if not missing else f"missing: {missing}"
+            print(f"  {i}. {tool} → {status}", file=sys.stderr)
+        else:
+            print(f"  {i}. {tool} → {json.dumps(output)}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("dish", help="Name of the savory dish to dessertify.")
@@ -53,12 +77,15 @@ def main() -> None:
 
     try:
         data = json.loads(body)
-        if "recipe" in data:
-            print(data["recipe"])
-        else:
-            print(json.dumps(data, indent=2))
     except json.JSONDecodeError:
         print(body)
+        return
+
+    if "recipe" in data:
+        print_iterations(data.get("iterations", []))
+        print(data["recipe"])
+    else:
+        print(json.dumps(data, indent=2))
 
 
 if __name__ == "__main__":

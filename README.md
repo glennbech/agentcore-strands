@@ -201,11 +201,25 @@ curl -s -X POST http://localhost:8080/invocations \
   -d '{"dish": "pizza"}' | jq .
 ```
 
-You should get back a JSON object with `dish` and `recipe` — the `recipe`
-field will be a dessert version of the dish with every original ingredient
-still present. If it looks reasonable (or, more accurately, gloriously
-unreasonable), the agent successfully looped through the `check_ingredients`
-tool until nothing was missing. Troubleshooting:
+You should get back a JSON object with `dish`, `recipe`, and — this is the
+important bit — an `iterations` array. Each entry is one `check_ingredients`
+call: what the agent asked, what the tool answered. Skim it:
+
+```json
+{
+  "dish": "pizza",
+  "recipe": "Pizza Dessert\nIngredients:\n- ...",
+  "iterations": [
+    {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": ["anchovy"]}},
+    {"tool": "check_ingredients", "input": {"recipe": "...", "ingredients": [...]}, "output": {"present": [...], "missing": []}}
+  ]
+}
+```
+
+That array *is* the agent loop. The model drafted, the tool said "you
+dropped anchovy", the model redrafted, the tool said "all present", the
+model returned the recipe. This is the difference between an agent and a
+single LLM call. Troubleshooting:
 
 - **`AccessDeniedException`** — model access isn't enabled for your account.
   The instructor handles model access; flag it if this fires.
@@ -231,15 +245,16 @@ tool until nothing was missing. Troubleshooting:
 for dish in "caesar salad" "bbq ribs" "beef bourguignon" "pad thai"; do
   curl -s -X POST http://localhost:8080/invocations \
     -H 'Content-Type: application/json' \
-    -d "{\"dish\": \"$dish\"}" | jq -r .recipe
+    -d "{\"dish\": \"$dish\"}" \
+    | jq '{dish, iterations: [.iterations[] | {tool, missing: .output.missing}], recipe}'
   echo "---"
 done
 ```
 
-Watch the uvicorn logs — you'll see the model call `check_ingredients` one or
-more times per invocation, adding back anything it dropped until nothing is
-missing. That's the agent loop, running locally, exactly the same as it will
-on AgentCore.
+Different dishes hit different loop depths — a dish with obvious dessert
+analogues (bread, sugar-friendly veg) often converges in one call; something
+like `caesar salad` with anchovy and parmesan takes a couple of iterations
+before the model gets everything back in. You're watching the agent think.
 
 Kill the local server before moving on. Because we launched it with `&`, the
 easiest way is:
@@ -366,9 +381,22 @@ python3 scripts/invoke.py "bbq ribs"
 python3 scripts/invoke.py "beef bourguignon"
 ```
 
-`invoke.py` reads the ARN from `terraform output` automatically. Note the
-`--session` flag it accepts — AgentCore requires a session id ≥ 33 characters,
-and the script pads short names for you.
+`invoke.py` reads the ARN from `terraform output` automatically. It prints
+the agent loop to stderr before the recipe — one line per tool call — so
+you can see the agent working, e.g.:
+
+```
+Agent loop — 2 tool call(s):
+  1. check_ingredients → missing: ['anchovy']
+  2. check_ingredients → all present ✓
+
+Pizza Dessert
+Ingredients:
+- ...
+```
+
+Redirect stderr away (`2>/dev/null`) if you just want the recipe. The
+`--session` flag sets the AgentCore session id (padded to 33 chars).
 
 > **Gotcha:** a session id is sticky to the runtime version it first hit. If
 > you re-`apply` Terraform with a new `model_id` (or otherwise create a new
