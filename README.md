@@ -113,17 +113,30 @@ Before you touch anything:
    aws --version    # aws-cli/2.x.x
    ```
 
-4. **Configure AWS credentials.**
+4. **Install Terraform.** Not shipped in the base image either. Grab a
+   recent Linux amd64 build from HashiCorp:
+   ```bash
+   cd /tmp
+   TF_VERSION=1.9.8
+   curl -fsSL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o terraform.zip
+   unzip terraform.zip
+   sudo mv terraform /usr/local/bin/
+   ```
+   Verify:
+   ```bash
+   terraform version    # Terraform v1.9.8
+   ```
+
+5. **Configure AWS credentials.**
    ```bash
    aws configure                     # region: us-east-1 is safest for Bedrock
    aws sts get-caller-identity       # sanity check
    ```
 
-5. **Sanity-check the rest of the toolchain** (all preinstalled by the
+6. **Sanity-check the rest of the toolchain** (preinstalled by the
    devcontainer):
    ```bash
    docker buildx version    # buildx (for ARM64 builds)
-   terraform version        # >= 1.6
    python3 --version        # >= 3.11
    ```
 
