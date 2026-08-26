@@ -417,39 +417,50 @@ Copy the `agent_runtime_arn` value. That's what you invoke.
 
 ## Step 5 — Invoke the deployed agent (5 min)
 
+The deployed runtime is just an AWS API — you can hit it with the AWS CLI,
+no Python needed:
+
 ```bash
 cd ..
-# Re-activate the venv you made in Step 1 if you're in a fresh shell:
-#   source agent/.venv/bin/activate
-pip install --upgrade boto3     # need a recent version for bedrock-agentcore
-python3 scripts/invoke.py "give me a pizza dessert"
-python3 scripts/invoke.py "bbq ribs dessert please"
-python3 scripts/invoke.py "I am allergic to nuts. Make me a beef bourguignon dessert."
+ARN=$(cd terraform && terraform output -raw agent_runtime_arn)
+SESSION=cli-workshop-session-000000000000000    # any 33+ char string
+
+# Payload has to be a blob, so write it to a file first.
+cat > /tmp/payload.json <<EOF
+{"message": "I am allergic to nuts. Give me a pizza dessert.", "session_id": "$SESSION"}
+EOF
+
+aws bedrock-agentcore invoke-agent-runtime \
+  --agent-runtime-arn "$ARN" \
+  --runtime-session-id "$SESSION" \
+  --payload fileb:///tmp/payload.json \
+  --region us-east-1 \
+  /tmp/response.json
+
+jq . /tmp/response.json
 ```
 
-`invoke.py` sends one message with a fresh throwaway `session_id` per call
-(so nothing persists between runs — for that, see the chat REPL below).
-It prints the agent loop to stderr before the reply — one line per tool
-call — so you can see the agent working, e.g.:
+You'll see the same JSON shape as Step 1's local curl — `reply` plus an
+`iterations` array showing every `remember`/`recall` call the agent made
+before answering. Run the same command again with the same `$SESSION` and
+`recall` will return the nut-allergy fact you stored on the first call —
+that's AgentCore Memory doing its job, keyed by session id.
 
-```
-Agent loop — 2 tool call(s):
-  1. remember → remembered: allergic to nuts
-  2. recall → recalled 1 fact(s): ['allergic to nuts']
+A few things to notice about the CLI form:
 
-Beef Bourguignon Dessert
-Ingredients:
-- ...
-```
-
-Redirect stderr away (`2>/dev/null`) if you just want the reply. `--session`
-lets you pin a session name if you want to hit the same container twice.
+- **AgentCore requires `runtime-session-id` to be at least 33 characters.**
+  Anything shorter is rejected.
+- **`--payload` must be a blob**, hence `fileb://<path>`. Passing the JSON
+  inline as a string works too but is fussier to quote.
+- **The response body is streamed to a positional outfile**
+  (`/tmp/response.json`), not stdout — `invoke-agent-runtime` returns
+  metadata on stdout and the actual body on the file.
 
 > **Gotcha:** a session id is sticky to the runtime version it first hit. If
 > you re-`apply` Terraform with a new `model_id` (or otherwise create a new
-> runtime version) and immediately re-invoke with the same `--session` value,
-> the request may still be routed to the *previous* container. Pass a fresh
-> `--session my-new-name` after any config change to force a new container.
+> runtime version) and immediately re-invoke with the same session id, the
+> request may still be routed to the *previous* container. Pick a fresh
+> session id after any config change to force a new container.
 
 Tail the CloudWatch logs in another shell while you invoke. The log group
 includes the runtime's short ID (from `terraform output agent_runtime_id`)
@@ -467,10 +478,13 @@ locally, just on someone else's box.
 
 ### Chat with the agent (multi-turn + session memory)
 
-`invoke.py` sends one shot on a throwaway session. For an actual
-conversation where the agent remembers what you told it, use:
+The CLI form is fine for one-shot calls, but for an actual conversation —
+where the agent remembers what you told it earlier and you can iterate on
+its answer — a REPL is much friendlier. `recipechat.py` wraps the same
+`invoke-agent-runtime` call in an input loop:
 
 ```bash
+pip install --upgrade boto3     # need a recent version for bedrock-agentcore
 python3 scripts/recipechat.py
 ```
 
@@ -590,8 +604,7 @@ Pick one, get it working, share with the class:
 │   └── outputs.tf
 ├── scripts/
 │   ├── build-and-push.sh       # buildx → ECR
-│   ├── invoke.py               # single-shot boto3 call to the deployed runtime
-│   └── recipechat.py           # multi-turn REPL (same runtime, session-persistent)
+│   └── recipechat.py           # multi-turn chat REPL over invoke_agent_runtime
 └── .gitignore
 ```
 
