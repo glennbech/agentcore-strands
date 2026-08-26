@@ -14,18 +14,70 @@ loop in about 60 lines of Python.
 The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
 agent to AWS in about an hour.**
 
-## What you'll actually learn
+## What is all this stuff? (read this if any of these words are new)
 
-| Piece | What it is | Why it matters |
-|---|---|---|
-| **Strands Agents SDK** | Open-source Python framework by AWS. `model + system prompt + tools = agent`. The SDK runs the agent loop for you (call model → run any tools the model asks for → feed results back → repeat until model returns final answer). | This is how you write agent logic in 30 lines instead of 300. |
-| **Amazon Bedrock AgentCore Runtime** | Serverless container host purpose-built for agents. ARM64 image, HTTP on port 8080, `POST /invocations` + `GET /ping`. | Someone else runs the container, handles auth, streams responses. You just push an image. |
-| **Terraform (`aws` provider)** | Declarative infra. `aws_bedrockagentcore_agent_runtime` is the resource we deploy. | This is how you ship agents at work — not clickops in the console. See Step 4 for `aws` vs `awscc`. |
-| **boto3 `bedrock-agentcore` client** | Data-plane SDK to call your deployed agent. | Any Python app (Lambda, backend, CLI) can now talk to your agent. |
+You'll touch about ten different tools in this exercise. Here's what each one
+is and why it's in the stack — you don't need to memorize this, just skim it
+so nothing feels like magic.
 
-By the end you'll have deployed a containerized agent, invoked it from the CLI,
-watched the logs in CloudWatch, and torn it all down. Every piece here is what
-teams actually use in production agent deployments.
+### The agent brain
+
+- **Amazon Bedrock** — AWS's API for calling large language models (Claude,
+  Nova, Llama, etc.) without hosting them yourself. You call an HTTPS endpoint,
+  AWS runs the inference, you pay per token. Our agent uses it to call Claude.
+- **Claude Haiku 4.5** — the specific model we call through Bedrock. Small,
+  cheap, fast. Good enough for a toy agent; you can swap in Sonnet later.
+- **Strands Agents SDK** — open-source Python framework from AWS. You write
+  `Agent(model=..., system_prompt=..., tools=[...])` and Strands runs the
+  agent loop for you: call the model → run whichever tools the model asked
+  for → feed results back → repeat until the model returns a final answer.
+  This is how the agent logic fits in 30 lines instead of 300.
+
+### The plumbing around the brain
+
+- **FastAPI** — a Python web framework. You decorate a function with
+  `@app.post("/invocations")` and FastAPI turns it into an HTTP endpoint that
+  can accept JSON, validate it, and return JSON. Think Flask but modern and
+  async. AgentCore Runtime requires our container to expose exactly two HTTP
+  routes (`GET /ping` and `POST /invocations`); FastAPI is how we do that.
+- **uvicorn** — the actual web server that runs a FastAPI app. FastAPI defines
+  the routes; uvicorn is what listens on port 8080 and speaks HTTP. When you
+  run `uvicorn app:app`, uvicorn imports your `app.py`, finds the `app`
+  object, and serves it. (In production people often put nginx or an
+  Application Load Balancer in front; for AgentCore, uvicorn on its own is
+  fine because AgentCore itself handles TLS and routing.)
+- **Docker** — packages our code + Python + its dependencies into a single
+  portable image. AgentCore Runtime pulls that image and runs it as a
+  container. `Dockerfile` describes what goes in.
+- **`docker buildx` + ARM64** — AgentCore Runtime only accepts `linux/arm64`
+  images (cheaper compute). Most laptops and Codespaces are x86_64, so we
+  need cross-architecture builds. `buildx` is Docker's cross-build system;
+  under the hood it uses QEMU to emulate ARM64. First build is slow (~3–5
+  min), then it caches.
+- **ECR (Elastic Container Registry)** — AWS's private Docker registry.
+  You push an image here; AgentCore Runtime pulls it from here. It's just
+  Docker Hub, but inside your AWS account.
+- **Amazon Bedrock AgentCore Runtime** — a serverless container host purpose-
+  built for agents. You give it "here's my image in ECR" and it handles
+  running the container, scaling it, terminating it when idle, TLS, auth,
+  logging, session routing. You never SSH into a box. The contract with your
+  container is minimal: expose `POST /invocations` and `GET /ping` on port
+  8080, that's it.
+- **Terraform** (the `aws` provider) — infrastructure as code. Instead of
+  clicking around the AWS console, you describe the resources you want
+  (an IAM role, an AgentCore runtime, etc.) in `.tf` files and Terraform
+  makes reality match. `aws_bedrockagentcore_agent_runtime` is the specific
+  resource type we deploy. This is how you ship agents at work.
+- **boto3** — the official Python SDK for AWS. Every AWS API has a boto3
+  client. We use `boto3.client("bedrock-agentcore")` to actually invoke our
+  deployed agent from a Python script.
+- **CloudWatch Logs** — AWS's log aggregator. Anything your container writes
+  to stdout/stderr ends up in a CloudWatch log group. We tail it with
+  `aws logs tail --follow` to watch requests in real time.
+
+By the end you'll have deployed a containerized agent, invoked it from the
+CLI, watched the logs in CloudWatch, and torn it all down. Every piece here
+is what teams actually use in production agent deployments.
 
 ---
 
@@ -39,18 +91,9 @@ Before you touch anything:
    aws sts get-caller-identity       # sanity check
    ```
 
-2. **Enable model access in Bedrock.**
-   - Open the Bedrock console → **Model access** → **Modify model access**.
-   - Enable **Anthropic Claude Haiku 4.5** in `us-east-1` (inference profile
-     `us.anthropic.claude-haiku-4-5-20251001-v1:0`). If you prefer a different
-     Haiku, override with `MODEL_ID=...` in your environment before starting
-     the server.
-   - Usually approved in under a minute. Without it, step 1 will fail with
-     `AccessDeniedException` or `ValidationException: The provided model
-     identifier is invalid`.
-
-3. **Tools already in your Codespace** (this workshop assumes GitHub Codespaces
-   — everything below is preinstalled there). Sanity-check:
+2. **Tools already in your Codespace** (this workshop assumes GitHub Codespaces
+   — the `.devcontainer/devcontainer.json` in this repo installs everything).
+   Sanity-check:
    ```bash
    docker buildx version    # buildx (for ARM64 builds)
    terraform version        # >= 1.6
@@ -61,7 +104,7 @@ Before you touch anything:
    from the official source (AWS CLI: <https://aws.amazon.com/cli/> — do **not**
    `pip install awscli`, that gives you v1 and breaks `aws logs tail`).
 
-4. **Open this repo in your Codespace.**
+3. **Open this repo in your Codespace.**
 
 > **Cost warning:** ECR storage is cents. AgentCore charges per invocation.
 > Claude Haiku is ~$0.0001 per short call. If you finish the exercise and run
@@ -71,24 +114,21 @@ Before you touch anything:
 
 ## The mental model (2 min — read this before you start)
 
-```
-   ┌──────────────────────┐        invoke_agent_runtime          ┌─────────────────────────┐
-   │  Your laptop / CI    │  ──────────────────────────────────▶ │  AgentCore Runtime      │
-   │  (boto3 client)      │                                      │  (serverless container) │
-   └──────────────────────┘                                      │                         │
-                                                                 │  ┌───────────────────┐  │
-                                                                 │  │ your container    │  │
-                                                                 │  │  FastAPI          │  │
-                                                                 │  │   /ping           │  │
-                                                                 │  │   /invocations ── │──┼──┐
-                                                                 │  └───────────────────┘  │  │
-                                                                 └─────────────────────────┘  │
-                                                                                              ▼
-                                                                                    ┌────────────────┐
-                                                                                    │ Strands Agent  │
-                                                                                    │   ↓ InvokeModel│
-                                                                                    │ Bedrock Haiku  │
-                                                                                    └────────────────┘
+```mermaid
+flowchart LR
+    Client["Your laptop / CI<br/>(boto3 client)"]
+    subgraph Runtime["AgentCore Runtime (serverless container)"]
+        direction TB
+        subgraph Container["your container"]
+            direction TB
+            FastAPI["FastAPI<br/>GET /ping<br/>POST /invocations"]
+            Strands["Strands Agent"]
+            FastAPI --> Strands
+        end
+    end
+    Bedrock["Bedrock<br/>Claude Haiku"]
+    Client -- "invoke_agent_runtime" --> FastAPI
+    Strands -- "InvokeModel" --> Bedrock
 ```
 
 Your container just needs to speak HTTP on `POST /invocations` and `GET /ping`.
@@ -133,7 +173,8 @@ still present. If it looks reasonable (or, more accurately, gloriously
 unreasonable), the agent successfully looped through the `check_ingredients`
 tool until nothing was missing. Troubleshooting:
 
-- **`AccessDeniedException`** — model access isn't enabled (prereqs, step 2).
+- **`AccessDeniedException`** — model access isn't enabled for your account.
+  The instructor handles model access; flag it if this fires.
 - **`ResourceNotFoundException: Model use case details have not been submitted`**
   — for Anthropic models on a fresh AWS account you must fill in the Anthropic
   use-case form from the Bedrock console (Model access → Anthropic → Available
