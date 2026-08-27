@@ -1,114 +1,109 @@
-# Dessertifier — an AgentCore + Strands discovery exercise
+# Dessertifier — an AgentCore and Strands exercise
 
-Name a savory dish. Get back a *dessert* version of it — with every original
-ingredient still intact. Anchovies stay anchovies, BBQ sauce stays BBQ sauce;
-they just get candied, whipped, or folded into meringue. The results are
-absurd on purpose.
+Given the name of a savory dish, the agent returns a dessert version of the
+same dish while retaining every ingredient from the original. Anchovies
+remain anchovies; barbecue sauce remains barbecue sauce; ingredients are
+candied, whipped, or folded into meringue rather than substituted.
 
-The interesting bit — visible in the response so you can literally watch
-it happen: **the agent has session-scoped memory it uses on its own**,
-backed by AgentCore Memory. `remember` and `recall` tools let it build up
-a per-session memory of your preferences and allergies that survives
-container recycles and scale-out. Same session → same memory across
-turns. Different session → nothing recalled. The container itself stays
-effectively stateless w.r.t. durable state.
+The agent maintains session-scoped memory through Amazon Bedrock AgentCore
+Memory. Two tools — `remember` and `recall` — persist and retrieve
+per-session facts (dietary preferences, allergies, stylistic constraints)
+that survive container recycles and scale events. Requests carrying the
+same `session_id` share memory; different values are isolated. The
+container itself holds no durable state.
 
-The task is silly so the fun bit is the plumbing: **you'll ship a real LLM
-agent to AWS in about an hour.**
+The task is deliberately trivial. The purpose of the exercise is to walk
+through a complete deployment of an LLM agent to AWS in approximately one
+hour.
 
-## What is all this stuff? (read this if any of these words are new)
+## Components
 
-You'll touch about ten different tools in this exercise. Here's what each one
-is and why it's in the stack — you don't need to memorize this, just skim it
-so nothing feels like magic.
+The exercise involves roughly ten distinct components. Prior familiarity is
+not required; the summary below is provided for reference.
 
-### The agent brain
+### Model and agent framework
 
-- **Amazon Bedrock** — AWS's API for calling large language models (Claude,
-  Nova, Llama, etc.) without hosting them yourself. You call an HTTPS endpoint,
-  AWS runs the inference, you pay per token. Our agent uses it to call Claude.
-- **Claude Haiku 4.5** — the specific model we call through Bedrock. Small,
-  cheap, fast. Good enough for a toy agent; you can swap in Sonnet later.
-- **Strands Agents SDK** — open-source Python framework from AWS. You write
-  `Agent(model=..., system_prompt=..., tools=[...])` and Strands runs the
-  agent loop for you: call the model → run whichever tools the model asked
-  for → feed results back → repeat until the model returns a final answer.
-  This is how the agent logic fits in dozens of lines instead of hundreds.
+- **Amazon Bedrock** — an AWS service that exposes large language models
+  (Claude, Nova, Llama, and others) through an HTTPS API. Inference is
+  managed by AWS and billed per token. The agent calls Claude through
+  Bedrock.
+- **Claude Haiku 4.5** — the specific model invoked through Bedrock. It is
+  small, inexpensive, and low-latency, and is sufficient for this exercise.
+  Larger models such as Claude Sonnet can be substituted later.
+- **Strands Agents SDK** — an open-source Python framework maintained by
+  AWS. Instantiating `Agent(model=..., system_prompt=..., tools=[...])`
+  produces an agent that runs the standard tool loop: invoke the model,
+  execute any requested tools, feed results back, and repeat until the
+  model produces a final answer. Strands keeps the agent implementation
+  short.
 
-### The plumbing around the brain
+### Runtime and infrastructure
 
-- **FastAPI** — a Python web framework. You decorate a function with
-  `@app.post("/invocations")` and FastAPI turns it into an HTTP endpoint that
-  can accept JSON, validate it, and return JSON. Think Flask but modern and
-  async. AgentCore Runtime requires our container to expose exactly two HTTP
-  routes (`GET /ping` and `POST /invocations`); FastAPI is how we do that.
-- **uvicorn** — the actual web server that runs a FastAPI app. FastAPI defines
-  the routes; uvicorn is what listens on port 8080 and speaks HTTP. When you
-  run `uvicorn app:app`, uvicorn imports your `app.py`, finds the `app`
-  object, and serves it. (In production people often put nginx or an
-  Application Load Balancer in front; for AgentCore, uvicorn on its own is
-  fine because AgentCore itself handles TLS and routing.)
-- **Docker** — packages our code + Python + its dependencies into a single
-  portable image. AgentCore Runtime pulls that image and runs it as a
-  container. `Dockerfile` describes what goes in.
-- **`docker buildx` + ARM64** — AgentCore Runtime only accepts `linux/arm64`
-  images (cheaper compute). Most laptops and Codespaces are x86_64, so we
-  need cross-architecture builds. `buildx` is Docker's cross-build system;
-  under the hood it uses QEMU to emulate ARM64. First build is slow (~3–5
-  min), then it caches.
-- **ECR (Elastic Container Registry)** — AWS's private Docker registry.
-  You push an image here; AgentCore Runtime pulls it from here. It's just
-  Docker Hub, but inside your AWS account.
-- **Amazon Bedrock AgentCore Runtime** — a serverless container host purpose-
-  built for agents. You give it "here's my image in ECR" and it handles
-  running the container, scaling it, terminating it when idle, TLS, auth,
-  logging, session routing. You never SSH into a box. The contract with your
-  container is minimal: expose `POST /invocations` and `GET /ping` on port
-  8080, that's it.
-- **Amazon Bedrock AgentCore Memory** — the managed durable state store
-  that goes with AgentCore Runtime. You get a `memoryId`, then use the
-  `CreateEvent` / `ListEvents` / `RetrieveMemoryRecords` APIs to persist
-  facts about a session (or user, or actor) that survive container
-  recycles and scale-out. Our `remember` and `recall` tools call into it.
-- **Terraform** (the `aws` provider) — infrastructure as code. Instead of
-  clicking around the AWS console, you describe the resources you want
-  (an IAM role, an AgentCore runtime, etc.) in `.tf` files and Terraform
-  makes reality match. `aws_bedrockagentcore_agent_runtime` is the specific
-  resource type we deploy. This is how you ship agents at work.
-- **boto3** — the official Python SDK for AWS. Every AWS API has a boto3
-  client. We use `boto3.client("bedrock-agentcore")` to actually invoke our
-  deployed agent from a Python script.
-- **CloudWatch Logs** — AWS's log aggregator. Anything your container writes
-  to stdout/stderr ends up in a CloudWatch log group. We tail it with
-  `aws logs tail --follow` to watch requests in real time.
+- **FastAPI** — a Python web framework. Endpoints declared with decorators
+  such as `@app.post("/invocations")` are exposed as HTTP routes with JSON
+  validation. AgentCore Runtime requires the container to expose exactly
+  two endpoints (`GET /ping` and `POST /invocations`); FastAPI provides
+  them.
+- **uvicorn** — the ASGI server that hosts the FastAPI application.
+  Running `uvicorn app:app` imports `app.py` and serves the `app` object
+  on port 8080. AgentCore terminates TLS and handles routing externally,
+  so no additional web server is required.
+- **Docker** — packages the application, Python runtime, and dependencies
+  into a portable image. AgentCore Runtime pulls the image and runs it as
+  a container. The `Dockerfile` describes its contents.
+- **`docker buildx` with ARM64** — AgentCore Runtime accepts only
+  `linux/arm64` images. Most development machines are `x86_64`, so
+  cross-architecture builds are required. `docker buildx` performs
+  cross-builds using QEMU emulation. The first build takes several
+  minutes; subsequent builds are cached.
+- **Amazon Elastic Container Registry (ECR)** — AWS's private container
+  registry. Images are pushed to ECR and pulled from ECR by AgentCore
+  Runtime.
+- **Amazon Bedrock AgentCore Runtime** — a serverless container host
+  designed for agents. Given an image reference in ECR, it manages the
+  container lifecycle, scaling, idle termination, TLS, authentication,
+  logging, and session-based routing. The container's only responsibility
+  is to expose `POST /invocations` and `GET /ping` on port 8080.
+- **Amazon Bedrock AgentCore Memory** — a managed durable state store
+  associated with AgentCore Runtime. It exposes `CreateEvent`,
+  `ListEvents`, and `RetrieveMemoryRecords` operations for persisting
+  facts scoped by session, user, or actor identifier. The `remember` and
+  `recall` tools invoke this service.
+- **Terraform (AWS provider)** — declarative infrastructure as code. AWS
+  resources are described in `.tf` files and reconciled by Terraform. The
+  `aws_bedrockagentcore_agent_runtime` resource is the entry point for
+  deployment.
+- **boto3** — the official Python SDK for AWS. The exercise invokes the
+  deployed agent using `boto3.client("bedrock-agentcore")`.
+- **Amazon CloudWatch Logs** — AWS's log aggregation service. Container
+  output on stdout and stderr is collected into a CloudWatch log group and
+  can be streamed with `aws logs tail --follow`.
 
-By the end you'll have deployed a containerized agent, invoked it from the
-CLI, watched the logs in CloudWatch, and torn it all down. Every piece here
-is what teams actually use in production agent deployments.
+The exercise concludes with a containerized agent deployed to AWS, invoked
+from the command line, monitored through CloudWatch, and then removed.
+Each component is representative of a production agent deployment.
 
 ---
 
-## Prerequisites (5 min)
+## Prerequisites (5 minutes)
 
-Before you touch anything:
+Before beginning:
 
-1. **Open this repo in your Codespace.**
+1. **Open the repository in your Codespace.**
 
-2. **Pick your unique per-student suffix.** Every attendee deploys into the
-   same shared AWS account, so every ECR repo, IAM role, and AgentCore
-   runtime is scoped by a per-student suffix. Pick your initials plus
-   something distinctive — letters, digits, or underscores only, no hyphens,
-   max 16 chars. Then export it in your shell so every command below picks
-   it up:
+2. **Choose a per-student suffix.** All attendees deploy into a shared AWS
+   account, so each ECR repository, IAM role, and AgentCore runtime is
+   scoped by a per-student suffix. Use your initials plus a distinctive
+   fragment — letters, digits, or underscores only, no hyphens, maximum
+   16 characters. Export it so subsequent commands inherit the value:
    ```bash
-   export SUFFIX=gb42              # your initials + something clever
+   export SUFFIX=gb42              # initials plus additional identifier
    export TF_VAR_suffix=$SUFFIX    # Terraform reads TF_VAR_* automatically
    ```
-   Every `${SUFFIX}` in this doc expands to the value you just set. If you
-   open a fresh terminal, re-export both variables.
+   Every `${SUFFIX}` in this document expands to the exported value.
+   Re-export both variables in any new terminal.
 
-3. **Install the AWS CLI v2.** The Codespace base image doesn't ship it. In
-   the Codespace terminal:
+3. **Install AWS CLI v2.** The Codespace base image does not include it:
    ```bash
    cd /tmp
    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -120,8 +115,8 @@ Before you touch anything:
    aws --version    # aws-cli/2.x.x
    ```
 
-4. **Install Terraform.** Not shipped in the base image either. Grab a
-   recent Linux amd64 build from HashiCorp:
+4. **Install Terraform.** Also not included in the base image. Download a
+   recent Linux `amd64` build from HashiCorp:
    ```bash
    cd /tmp
    TF_VERSION=1.9.8
@@ -136,31 +131,31 @@ Before you touch anything:
 
 5. **Configure AWS credentials.**
    ```bash
-   aws configure                     # region: us-east-1 is safest for Bedrock
-   aws sts get-caller-identity       # sanity check
+   aws configure                     # region: us-east-1 recommended for Bedrock
+   aws sts get-caller-identity       # verification
    ```
 
-6. **Sanity-check the rest of the toolchain** (preinstalled by the
-   devcontainer):
+6. **Verify the remaining tooling** (installed by the devcontainer):
    ```bash
-   docker buildx version    # buildx (for ARM64 builds)
-   python3 --version        # >= 3.11
+   docker buildx version    # buildx (required for ARM64 builds)
+   python3 --version        # 3.11 or later
    ```
 
-> **Cost warning:** ECR storage is cents. AgentCore charges per invocation.
-> Claude Haiku is ~$0.0001 per short call. If you finish the exercise and run
-> the cleanup at the end, total spend is under $0.10. **Don't skip cleanup.**
+> **Cost note:** ECR storage is on the order of cents. AgentCore is billed
+> per invocation. Claude Haiku costs approximately $0.0001 per short call.
+> Completing the exercise and running the cleanup at the end results in
+> total spend under $0.10. **Cleanup is mandatory.**
 
 ---
 
-## The mental model (2 min — read this before you start)
+## Architecture (2 minutes)
 
 ```mermaid
 flowchart LR
-    Client["Your laptop / CI<br/>(boto3 client)"]
+    Client["Client (boto3)"]
     subgraph Runtime["AgentCore Runtime (session-routed containers)"]
         direction TB
-        subgraph Container["your container"]
+        subgraph Container["container"]
             direction TB
             FastAPI["FastAPI<br/>GET /ping<br/>POST /invocations"]
             Strands["Strands Agent<br/>(one per session_id)"]
@@ -174,54 +169,59 @@ flowchart LR
     Strands -- "remember / recall<br/>(CreateEvent / ListEvents)" --> Memory
 ```
 
-Your container speaks HTTP on `POST /invocations` and `GET /ping`.
-Everything else — TLS, auth, logging, autoscaling, session-based routing —
-is AgentCore's problem. We use **FastAPI** for those two endpoints and
-**Strands** as the agent brain behind them. Durable state (the user's
-remembered facts per `session_id`) lives in **AgentCore Memory**, not in
-the container, so it survives idle recycles and scale events. The
-container keeps only the current chat's in-flight message history in a
-per-session `Agent` object; if the container is recycled mid-chat, only
-that ephemeral scratchpad is lost — every remembered fact is still there.
+The container serves `POST /invocations` and `GET /ping` over HTTP. TLS
+termination, authentication, logging, autoscaling, and session-based
+routing are handled by AgentCore. **FastAPI** provides the HTTP endpoints;
+**Strands** implements the agent loop. Durable state — the user's
+remembered facts per `session_id` — is stored in **AgentCore Memory**,
+not in the container, and therefore survives idle recycles and scale
+events. The container retains only the current conversation's in-flight
+message history in a per-session `Agent` object; if the container is
+recycled mid-conversation, that ephemeral state is lost while every
+remembered fact is preserved externally.
 
 ---
 
-## Step 1 — Build the agent locally (20 min)
+## Step 1 — Build the agent locally (20 minutes)
 
-The whole agent is in [`agent/app.py`](agent/app.py). Read it — it's around
-130 lines, most of which are docstrings and the system prompt. The important
-bits:
+The complete agent is defined in [`agent/app.py`](agent/app.py) —
+approximately 130 lines, the majority of which are docstrings and the
+system prompt. The key elements:
 
-- `FastAPI()` with two routes: `GET /ping` (health check) and `POST /invocations`
-  (the actual work). These are the two routes AgentCore requires.
+- `FastAPI()` with two routes: `GET /ping` (health check) and
+  `POST /invocations` (request handler). These are the two routes required
+  by AgentCore.
 - `Agent(model=..., system_prompt=..., tools=[...])` — the Strands agent
-  object. Strands runs the tool loop inside it.
-- `@tool` — decorator that exposes a plain Python function to the LLM. The
-  docstring is what the model sees when deciding whether to call the tool.
+  object. The tool loop runs inside it.
+- `@tool` — decorator that exposes a Python function to the model. The
+  function's docstring is what the model consults when deciding whether to
+  invoke the tool.
 - `_memory = boto3.client("bedrock-agentcore")` — the AgentCore Memory
-  data-plane client. `MEMORY_ID` is passed in via env var by Terraform.
-- `_remember_fact` / `_recall_facts` — thin wrappers around `create_event`
-  / `list_events`, keyed by `session_id` (which we use as both `actorId`
-  and `sessionId` for the workshop). They also have a plain-dict fallback
-  for local `uvicorn` runs where `MEMORY_ID` isn't set.
-- `_make_session_tools(session_id)` — builds `remember` and `recall` as
-  closures over the current `session_id` so the model can't accidentally
-  leak facts across sessions.
-- `_sessions: dict[str, Agent]` — the container's only in-memory state:
-  the current chat's Strands Agent (with its in-flight message history).
-  Ephemeral by design — dies on container recycle, but every remembered
-  fact survives externally in AgentCore Memory.
+  data-plane client. `MEMORY_ID` is supplied through an environment
+  variable by Terraform.
+- `_remember_fact` and `_recall_facts` — thin wrappers around
+  `create_event` and `list_events`, keyed by `session_id` (used as both
+  `actorId` and `sessionId` for this exercise). A plain-dictionary
+  fallback is included for local `uvicorn` runs where `MEMORY_ID` is not
+  set.
+- `_make_session_tools(session_id)` — constructs `remember` and `recall`
+  as closures over the current `session_id`, preventing accidental
+  cross-session leakage.
+- `_sessions: dict[str, Agent]` — the container's only in-memory state,
+  holding the current conversation's Strands `Agent`. This state is
+  ephemeral by design: it is discarded on container recycle, while every
+  remembered fact persists externally in AgentCore Memory.
 
-### Run it locally
+### Running the agent locally
 
-Before you start: **this local run isn't an agent anyone else can use.**
-It's a Python web server on your Codespace, bound to a port only you can
-reach — no public URL, no auth, no persistence across container restarts,
-no session-routed replicas. Great for confirming the code works before we
-ship it. To turn it into something the rest of the world (or even a
-teammate) can call, you have to package it into a container (Step 3) and
-hand it to AgentCore Runtime to host (Step 4). That's when it becomes a
-deployed agent with a real ARN, TLS, IAM auth, and durable memory.
+The local process is not a deployed agent. It is a Python web server bound
+to a port accessible only within your Codespace — no public URL, no
+authentication, no persistence across restarts, no session-routed
+replicas. Its purpose is to verify that the code runs correctly before
+packaging. Turning it into a service that others can invoke requires
+packaging it into a container (Step 3) and hosting it through AgentCore
+Runtime (Step 4), at which point it acquires an ARN, TLS, IAM
+authentication, and durable memory.
 
 ```bash
 cd agent
@@ -230,11 +230,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 uvicorn app:app --host 0.0.0.0 --port 8080 &
-# ↑ MEMORY_ID isn't set locally so remember/recall use an in-process dict
-#   fallback — enough to see the loop work. The deployed runtime (Step 4)
-#   gets MEMORY_ID from Terraform and uses real AgentCore Memory.
+# MEMORY_ID is unset locally, so remember/recall use an in-process
+# dictionary fallback — sufficient to exercise the loop. The deployed
+# runtime (Step 4) receives MEMORY_ID from Terraform and uses AgentCore
+# Memory directly.
 
-# Give it a second to boot, then:
+# After a brief delay:
 curl -s http://localhost:8080/ping                    # {"status":"Healthy"}
 
 curl -s -X POST http://localhost:8080/invocations \
@@ -242,9 +243,9 @@ curl -s -X POST http://localhost:8080/invocations \
   -d '{"message": "give me a pizza dessert", "session_id": "local-demo"}' | jq .
 ```
 
-You should get back a JSON object with `reply` and — this is the important
-bit — an `iterations` array. Each entry is one tool call the agent made:
-what it asked, what the tool answered. Skim it:
+The response is a JSON object containing `reply` and an `iterations`
+array. Each entry corresponds to one tool call made by the agent,
+recording the input and output:
 
 ```json
 {
@@ -255,62 +256,62 @@ what it asked, what the tool answered. Skim it:
 }
 ```
 
-The model chose to call `recall` before answering, saw the session had no
-remembered facts, then wrote the recipe. Now let's give it something to
-remember. Send two messages on the same `session_id`:
+The model called `recall` before answering, observed that the session held
+no remembered facts, and then produced the recipe. To exercise
+persistence, send two messages with the same `session_id`:
 
 ```bash
-# Turn 1: tell it something
+# Turn 1: assert preferences
 curl -s -X POST http://localhost:8080/invocations -H 'Content-Type: application/json' \
   -d '{"message": "I hate coconut and I am allergic to nuts", "session_id": "local-demo"}' | jq .
 
-# Turn 2: ask for a recipe — recall should return your two facts
+# Turn 2: request a recipe — recall returns the two facts
 curl -s -X POST http://localhost:8080/invocations -H 'Content-Type: application/json' \
   -d '{"message": "make me a pad thai dessert", "session_id": "local-demo"}' | jq .
 ```
 
-In turn 1's iterations you'll see `remember → "remembered: hates coconut"`
-and `remember → "remembered: allergic to nuts"`. In turn 2's iterations,
-`recall` returns those two facts and the recipe avoids both. Change
-`session_id` to `"other"` on turn 2 and `recall` returns `[]` — different
-session, different memory. That's session affinity, visible.
+In turn 1's `iterations`, `remember` is invoked twice, returning
+`"remembered: hates coconut"` and `"remembered: allergic to nuts"`. In
+turn 2's `iterations`, `recall` returns both facts and the recipe honors
+both constraints. Substituting `"other"` for `session_id` in turn 2 causes
+`recall` to return `[]`, demonstrating session isolation.
 
 Troubleshooting:
 
-- **`AccessDeniedException`** — model access isn't enabled for your account.
-  The instructor handles model access; flag it if this fires.
+- **`AccessDeniedException`** — model access has not been enabled for the
+  account. Model access is managed by the instructor; report the error.
 - **`ResourceNotFoundException: Model use case details have not been submitted`**
-  — for Anthropic models on a fresh AWS account you must fill in the Anthropic
-  use-case form from the Bedrock console (Model access → Anthropic → Available
-  to request → fill form). Approval can take up to 15 minutes. If your account
-  can't get that approved right now, temporarily point at an Amazon-owned model
-  such as Nova micro with `MODEL_ID=us.amazon.nova-micro-v1:0 uvicorn ...`.
-  The same fallback applies to the *deployed* runtime in Step 4 — pass the
-  override as a Terraform variable:
-  `terraform apply -var 'model_id=us.amazon.nova-micro-v1:0'`.
-- **`ValidationException: The provided model identifier is invalid`** — the
-  model ID is wrong or that inference profile isn't ACTIVE in your region.
-  Run `aws bedrock list-inference-profiles --region us-east-1` to see valid
-  IDs.
-- **`NoCredentialsError`** — `aws configure` didn't take; check `~/.aws/credentials`.
-- **Port 8080 in use** — `lsof -ti:8080 | xargs kill`.
+  — for Anthropic models on a new AWS account, the Anthropic use-case form
+  must be submitted from the Bedrock console (Model access → Anthropic →
+  Available to request → complete form). Approval can take up to 15
+  minutes. As a workaround, an Amazon-owned model such as Nova Micro can
+  be used: `MODEL_ID=us.amazon.nova-micro-v1:0 uvicorn ...`. The same
+  override applies to the deployed runtime in Step 4 through a Terraform
+  variable: `terraform apply -var 'model_id=us.amazon.nova-micro-v1:0'`.
+- **`ValidationException: The provided model identifier is invalid`** —
+  the model identifier is incorrect or the inference profile is not
+  `ACTIVE` in the current region. Run
+  `aws bedrock list-inference-profiles --region us-east-1` to list valid
+  identifiers.
+- **`NoCredentialsError`** — `aws configure` did not persist credentials;
+  verify `~/.aws/credentials`.
+- **Port 8080 already bound** — `lsof -ti:8080 | xargs kill`.
 
-Kill the local server before moving on. Because we launched it with `&`, the
-easiest way is:
+Terminate the local server before continuing. Because it was launched with
+`&`:
 
 ```bash
 lsof -ti:8080 | xargs kill
 ```
 
-(`fg` also works if the job is still attached to the current shell; on a fresh
-shell it won't be.)
+(`fg` also works if the job remains attached to the current shell.)
 
 ---
 
-## Step 2 — Create the ECR repo (2 min)
+## Step 2 — Create the ECR repository (2 minutes)
 
-AgentCore pulls your container from ECR, so the repo has to exist before we push
-an image (and before Terraform can look it up).
+AgentCore pulls the container from ECR, so the repository must exist
+before an image is pushed and before Terraform can reference it.
 
 ```bash
 aws ecr create-repository \
@@ -318,7 +319,7 @@ aws ecr create-repository \
   --region us-east-1
 ```
 
-Confirm:
+Verify:
 
 ```bash
 aws ecr describe-repositories --repository-names dessertifier-agent-${SUFFIX} \
@@ -326,21 +327,23 @@ aws ecr describe-repositories --repository-names dessertifier-agent-${SUFFIX} \
   --query 'repositories[0].repositoryUri' --output text
 ```
 
-> Why not create the ECR repo in Terraform? Because the runtime resource needs
-> to reference an image *digest* that already exists. Building the image would
-> then depend on ECR, and Terraform would depend on the built image — that's a
-> circular dependency in a single stack. Externally-managed ECR keeps the flow
-> linear: **repo → push image → terraform apply**.
+> The ECR repository is not managed by Terraform because the AgentCore
+> runtime resource references an image *digest* that must already exist.
+> Building the image would depend on ECR, and Terraform would depend on
+> the built image — a cycle within a single stack. Managing ECR outside
+> Terraform keeps the flow linear: **repository → image push → terraform
+> apply**.
 
 ---
 
-## Step 3 — Build and push the ARM64 image (10 min)
+## Step 3 — Build and push the ARM64 image (10 minutes)
 
-**AgentCore Runtime only accepts `linux/arm64` images.** Codespaces are x86_64,
-so we use `docker buildx` with QEMU emulation. The first build is slow (~3–5 min
-because layers are cold); subsequent ones are fast.
+**AgentCore Runtime accepts only `linux/arm64` images.** Codespaces are
+`x86_64`, so `docker buildx` with QEMU emulation is used. The first build
+is slow (approximately 3–5 minutes because layers are cold); subsequent
+builds are fast.
 
-The build script reads your exported `SUFFIX` and pushes to
+The build script reads the exported `SUFFIX` and pushes to
 `dessertifier-agent-${SUFFIX}`:
 
 ```bash
@@ -349,11 +352,11 @@ cd ..
 ```
 
 The script:
-1. Logs docker into ECR with a temporary token.
-2. Creates a buildx builder (idempotent).
+1. Authenticates Docker with ECR using a temporary token.
+2. Creates a `buildx` builder (idempotent).
 3. Runs `docker buildx build --platform linux/arm64 --push`.
 
-Verify the image made it:
+Verify that the image was pushed:
 
 ```bash
 aws ecr list-images --repository-name dessertifier-agent-${SUFFIX} --region us-east-1
@@ -361,71 +364,74 @@ aws ecr list-images --repository-name dessertifier-agent-${SUFFIX} --region us-e
 
 ---
 
-## Step 4 — Deploy the AgentCore Runtime (10 min)
+## Step 4 — Deploy the AgentCore Runtime (10 minutes)
 
-Now Terraform can reference an image that actually exists.
+Terraform can now reference an image that exists in ECR.
 
-Open [`terraform/main.tf`](terraform/main.tf) and skim it before you apply.
-Even if you've never written Terraform, the shapes should look familiar:
-there's an IAM role with a trust policy and a policy document with SIDs
-(ECR pull, CloudWatch Logs, `bedrock:InvokeModel`, memory access), an ECR
-image lookup, and an AgentCore Runtime + AgentCore Memory resource. It's
-the same AWS you already know — just described in HCL instead of clicked
-into the console.
+Open [`terraform/main.tf`](terraform/main.tf) before applying. The resource
+shapes are conventional AWS: an IAM role with a trust policy and a policy
+document with SIDs (ECR pull, CloudWatch Logs, `bedrock:InvokeModel`,
+memory access), an ECR image lookup, and AgentCore Runtime and AgentCore
+Memory resources. The same AWS primitives are used, expressed in HCL
+rather than through the console.
 
 ```bash
 cd terraform
-terraform init     # pulls the aws provider (a few hundred MB) on first run
+terraform init     # downloads the aws provider (several hundred MB) on first run
 terraform apply
 ```
 
-### While apply runs, read `main.tf`. Pay attention to:
+### While the apply runs, review `main.tf`. Points of interest:
 
-- **The trust policy** on `aws_iam_role.runtime` — only the AgentCore
+- **The trust policy** on `aws_iam_role.runtime`: only the AgentCore
   service (`bedrock-agentcore.amazonaws.com`) can assume the role.
-- **The image URI** — pinned by *digest*, not tag. When you re-push a new image,
-  the `data.aws_ecr_image` re-reads the digest and Terraform sees a diff, which
-  forces a runtime update. If you used `:latest` directly, Terraform would never
-  notice.
-- **`aws_bedrockagentcore_memory.sessions`** — the durable facts store
-  the agent's `remember`/`recall` tools call into. Its `id` is injected
-  into the container as `MEMORY_ID` via `environment_variables`, and its
-  ARN is scoped in the runtime role's `Memory` IAM statement.
-- **`bedrock-agentcore:GetWorkloadAccessToken*`** — required so the runtime can
-  talk to the AgentCore control plane on your behalf.
+- **The image URI**: pinned by *digest*, not by tag. When a new image is
+  pushed, `data.aws_ecr_image` re-reads the digest and Terraform detects a
+  diff, forcing a runtime update. Referencing `:latest` directly would
+  prevent Terraform from noticing changes.
+- **`aws_bedrockagentcore_memory.sessions`**: the durable facts store that
+  `remember` and `recall` invoke. Its `id` is injected into the container
+  as `MEMORY_ID` through `environment_variables`, and its ARN is scoped
+  in the runtime role's `Memory` IAM statement.
+- **`bedrock-agentcore:GetWorkloadAccessToken*`**: required for the
+  runtime to communicate with the AgentCore control plane on the caller's
+  behalf.
 
-Apply usually takes ~2 min (runtime provisioning). If it fails with
-`CREATE_FAILED`, the usual culprits are:
+Apply typically completes in approximately 2 minutes (runtime
+provisioning). If `CREATE_FAILED` occurs, common causes are:
 
-- Image is x86_64 not arm64 — re-run `build-and-push.sh` after fixing.
-- Runtime role missing ECR perms — check the ECR statements in `main.tf`.
-- Runtime name collision — someone else in the workshop grabbed the same
-  `SUFFIX`; pick a new one, re-export, and re-run from Step 2.
+- Image built for `x86_64` rather than `arm64` — re-run
+  `build-and-push.sh` after correction.
+- Runtime role missing ECR permissions — verify the ECR statements in
+  `main.tf`.
+- Runtime name collision — the same `SUFFIX` is already in use by another
+  attendee; select a new value, re-export, and repeat from Step 2.
 - **`Role validation failed ... trust policy allows assumption by this
-  service`** — an IAM propagation race. The `aws` provider retries this
-  internally, but if it exhausts retries just run `terraform apply` again.
+  service`** — an IAM propagation race. The `aws` provider retries
+  internally; if retries are exhausted, re-run `terraform apply`.
 
-When it finishes:
+On success:
 
 ```bash
 terraform output
 ```
 
-Copy the `agent_runtime_arn` value. That's what you invoke.
+Record the `agent_runtime_arn` value; it is the identifier used to invoke
+the agent.
 
 ---
 
-## Step 5 — Invoke the deployed agent (5 min)
+## Step 5 — Invoke the deployed agent (5 minutes)
 
-The deployed runtime is just an AWS API — you can hit it with the AWS CLI,
-no Python needed:
+The deployed runtime is an AWS API; the AWS CLI is sufficient to invoke
+it, without any Python:
 
 ```bash
 cd ..
 ARN=$(cd terraform && terraform output -raw agent_runtime_arn)
-SESSION=cli-workshop-session-000000000000000    # any 33+ char string
+SESSION=cli-workshop-session-000000000000000    # arbitrary string, 33+ characters
 
-# Payload has to be a blob, so write it to a file first.
+# Payload must be provided as a blob; write it to a file.
 cat > /tmp/payload.json <<EOF
 {"message": "I am allergic to nuts. Give me a pizza dessert.", "session_id": "$SESSION"}
 EOF
@@ -440,31 +446,32 @@ aws bedrock-agentcore invoke-agent-runtime \
 jq . /tmp/response.json
 ```
 
-You'll see the same JSON shape as Step 1's local curl — `reply` plus an
-`iterations` array showing every `remember`/`recall` call the agent made
-before answering. Run the same command again with the same `$SESSION` and
-`recall` will return the nut-allergy fact you stored on the first call —
-that's AgentCore Memory doing its job, keyed by session id.
+The response has the same JSON structure as the local `curl` output in
+Step 1 — a `reply` field and an `iterations` array recording every
+`remember` and `recall` call the agent made before answering. Re-running
+the same command with the same `$SESSION` causes `recall` to return the
+nut-allergy fact stored on the first invocation, demonstrating that
+AgentCore Memory is persisting session-scoped state.
 
-A few things to notice about the CLI form:
+Notes on the CLI form:
 
-- **AgentCore requires `runtime-session-id` to be at least 33 characters.**
-  Anything shorter is rejected.
-- **`--payload` must be a blob**, hence `fileb://<path>`. Passing the JSON
-  inline as a string works too but is fussier to quote.
-- **The response body is streamed to a positional outfile**
-  (`/tmp/response.json`), not stdout — `invoke-agent-runtime` returns
-  metadata on stdout and the actual body on the file.
+- **`runtime-session-id` must be at least 33 characters.** Shorter values
+  are rejected by AgentCore.
+- **`--payload` must be a blob**, hence `fileb://<path>`. Inline JSON as a
+  string is also accepted but requires more careful quoting.
+- **The response body is written to a positional outfile**
+  (`/tmp/response.json`); stdout carries metadata only.
 
-> **Gotcha:** a session id is sticky to the runtime version it first hit. If
-> you re-`apply` Terraform with a new `model_id` (or otherwise create a new
-> runtime version) and immediately re-invoke with the same session id, the
-> request may still be routed to the *previous* container. Pick a fresh
-> session id after any config change to force a new container.
+> **Note:** a session identifier is sticky to the runtime version it first
+> reaches. Re-running `terraform apply` with a new `model_id` (or
+> otherwise creating a new runtime version) and immediately re-invoking
+> with the same session identifier may still route the request to the
+> previous container. Use a fresh session identifier after any
+> configuration change to force a new container.
 
-Tail the CloudWatch logs in another shell while you invoke. The log group
-includes the runtime's short ID (from `terraform output agent_runtime_id`)
-plus `-DEFAULT`:
+To tail the CloudWatch logs from a second shell during invocation, use the
+log group name derived from the runtime's short identifier
+(`terraform output agent_runtime_id`) with the `-DEFAULT` suffix:
 
 ```bash
 RUNTIME_ID=$(cd terraform && terraform output -raw agent_runtime_id)
@@ -472,36 +479,37 @@ aws logs tail "/aws/bedrock-agentcore/runtimes/${RUNTIME_ID}-DEFAULT" \
   --region us-east-1 --follow
 ```
 
-You'll see the FastAPI request line, the Strands model call, the tool
-invocation, and the response — the exact same log stream you'd get running it
-locally, just on someone else's box.
+The stream contains the FastAPI request line, the Strands model call, the
+tool invocation, and the response — identical in content to a local run.
 
-### Chat with the agent (multi-turn + session memory)
+### Interactive session
 
-The CLI form is fine for one-shot calls, but for an actual conversation —
-where the agent remembers what you told it earlier and you can iterate on
-its answer — a REPL is much friendlier. `recipechat.py` wraps the same
-`invoke-agent-runtime` call in an input loop.
+The CLI form is suitable for one-shot invocations. For a multi-turn
+conversation — where the agent recalls prior context and the recipe can
+be iteratively refined — a REPL is more convenient. `recipechat.py` wraps
+`invoke-agent-runtime` in an input loop.
 
-Reuse the venv from Step 1 (it already has boto3), or make a fresh one:
+Reuse the virtual environment from Step 1 (which already contains
+`boto3`), or create a new one:
 
 ```bash
-# Option A: reuse the Step 1 venv (fastest — boto3 is already there)
+# Option A: reuse the Step 1 venv (boto3 already installed)
 source agent/.venv/bin/activate
 
-# Option B: fresh venv from the repo root
+# Option B: fresh venv from the repository root
 python3 -m venv .venv && source .venv/bin/activate && pip install boto3
 
-# Then, either way:
+# Then, in either case:
 python3 scripts/recipechat.py
 ```
 
 AgentCore routes every turn for the same `runtimeSessionId` to the same
-container instance so the current chat's Strands `Agent` (message history
-in flight) stays warm across turns. Facts you tell it go through
-`remember` → `create_event` into AgentCore Memory, keyed by `session_id`.
-Different `session_id` → different actor in AgentCore Memory → nothing
-`recall`ed. Try:
+container instance, so the current conversation's Strands `Agent` (with
+its in-flight message history) remains available across turns. Facts
+asserted by the user are persisted through `remember` → `create_event`
+into AgentCore Memory, keyed by `session_id`. A different `session_id`
+corresponds to a different actor in AgentCore Memory, and `recall`
+returns nothing. Example:
 
 ```
 you > I am allergic to nuts and I hate coconut
@@ -523,23 +531,23 @@ you > now do bbq ribs
   1. recall → recalled 2 fact(s): [...]     ← same session, same memory
 ```
 
-Open a second `recipechat.py` in another terminal and ask for the same
-recipes — `recall` returns `[]` because it's a fresh `session_id` and
-AgentCore Memory has no events for it. Kill and restart your first REPL
-and its `recall` still returns the original facts, even though the
-container may have handed you a new Strands `Agent`: the durable state
-lives in AgentCore Memory, not in the container.
+Opening a second `recipechat.py` in another terminal and requesting the
+same recipes causes `recall` to return `[]`, because the fresh
+`session_id` has no events in AgentCore Memory. Terminating and
+restarting the first REPL still returns the original facts on `recall`,
+even if the container has assigned a new Strands `Agent`: durable state
+resides in AgentCore Memory, not in the container.
 
 ---
 
-## Step 6 — Clean up (5 min) **DO NOT SKIP**
+## Step 6 — Clean up (5 minutes) — **DO NOT SKIP**
 
 ```bash
 cd terraform
 terraform destroy
 ```
 
-Then delete the ECR repo (Terraform doesn't own it):
+Then delete the ECR repository (which is not managed by Terraform):
 
 ```bash
 aws ecr delete-repository \
@@ -548,7 +556,7 @@ aws ecr delete-repository \
   --force
 ```
 
-Confirm nothing is left:
+Confirm that no resources remain:
 
 ```bash
 aws bedrock-agentcore-control list-agent-runtimes \
@@ -559,64 +567,67 @@ aws ecr describe-repositories \
   --query 'repositories[].repositoryName' 2>/dev/null
 ```
 
-Neither should contain anything starting with `dessertifier`.
+Neither result should contain any name beginning with `dessertifier`.
 
 ---
 
-## Extensions (if you finish early)
+## Extensions
 
-Pick one, get it working, share with the class:
+For attendees who finish early:
 
-1. **Add a verification-loop tool.** Right now the model tries to keep every
-   savory ingredient in the dessert version but nothing enforces it — it
-   often quietly drops the unpleasant ones. Write `@tool def
-   check_ingredients(recipe: str, ingredients: list[str])` that returns
-   which ingredients from the savory original are missing from the recipe,
-   and update the system prompt so the agent must call it and loop until
-   nothing is missing. Watch the `iterations` array grow. This is the
-   classic "tool tells ground truth, agent iterates" pattern.
-2. **Swap the model.** `main.tf` passes `MODEL_ID` as an env var to the
-   container, and the `model_id` Terraform variable controls it. Try
-   `terraform apply -var 'model_id=us.anthropic.claude-sonnet-4-5-20250929-v1:0'`
-   — no rebuild needed. Compare quality vs. latency vs. cost.
-3. **Stream responses.** FastAPI supports `StreamingResponse`; Strands supports
-   `agent.stream_async(...)`. Change the invoke script to print tokens as they
-   arrive.
-4. **Cross-session memory via user id.** Session memory is already in
-   AgentCore Memory but keyed by `session_id`, so switching sessions
-   wipes the recall. Add a `user_id` to the payload and use that as the
-   `actorId` in `create_event` / `list_events`. Same user across two
-   sessions will now share facts. Bonus: wire in a `USER_PREFERENCE`
+1. **Add a verification-loop tool.** As currently implemented, the model
+   attempts to retain every savory ingredient in the dessert version, but
+   no mechanism enforces the constraint and less palatable ingredients
+   are frequently dropped. Implement
+   `@tool def check_ingredients(recipe: str, ingredients: list[str])`
+   returning the ingredients from the savory original that are missing
+   from the recipe, and update the system prompt so the agent must invoke
+   it and iterate until nothing is missing. This illustrates the
+   "tool as ground truth, agent iterates" pattern.
+2. **Change the model.** `main.tf` passes `MODEL_ID` to the container as
+   an environment variable, controlled by the `model_id` Terraform
+   variable. For example:
+   `terraform apply -var 'model_id=us.anthropic.claude-sonnet-4-5-20250929-v1:0'`.
+   No rebuild is required. Compare output quality, latency, and cost.
+3. **Stream responses.** FastAPI supports `StreamingResponse`; Strands
+   supports `agent.stream_async(...)`. Modify the invocation script to
+   render tokens as they arrive.
+4. **Cross-session memory keyed by user identifier.** Session memory is
+   already stored in AgentCore Memory but keyed by `session_id`, so
+   switching sessions loses recall. Add a `user_id` to the payload and
+   use it as `actorId` in `create_event` and `list_events`. The same user
+   across two sessions will then share facts. As a further extension,
+   enable a `USER_PREFERENCE`
    [memory strategy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
    so extracted preferences become semantically searchable.
-5. **Add a second toy agent.** An `Emojifier` (rewrites text to contain
-   exactly N emojis, tool: `count_emojis(text)`, loop until the count is
-   exact). Same pattern, ten minutes. Second Docker image, second runtime
-   resource in Terraform.
+5. **Add a second agent.** For example, an `Emojifier` that rewrites text
+   to contain exactly N emojis, using a `count_emojis(text)` tool and
+   looping until the count matches. The same pattern applies: a second
+   Docker image and a second runtime resource in Terraform.
 
 ---
 
-## Reference — file layout
+## File layout
 
 ```
 .
 ├── README.md
 ├── agent/
-│   ├── app.py                  # FastAPI + Strands agent
+│   ├── app.py                  # FastAPI application and Strands agent
 │   ├── requirements.txt
-│   └── Dockerfile              # ARM64, uvicorn on :8080
+│   └── Dockerfile              # ARM64, uvicorn on port 8080
 ├── terraform/
 │   ├── versions.tf             # aws provider (~> 6.0)
 │   ├── variables.tf
 │   ├── main.tf                 # IAM role, AgentCore Runtime, image lookup
 │   └── outputs.tf
 ├── scripts/
-│   ├── build-and-push.sh       # buildx → ECR
+│   ├── build-and-push.sh       # buildx to ECR
 │   └── recipechat.py           # multi-turn chat REPL over invoke_agent_runtime
 └── .gitignore
 ```
 
-## Reference — docs to read after class
+## Further reading
 
 - Strands Agents: <https://strandsagents.com/>
 - AgentCore Runtime: <https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime.html>
