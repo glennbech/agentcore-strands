@@ -224,6 +224,7 @@ Runtime (Step 4), at which point it acquires an ARN, TLS, IAM
 authentication, and durable memory.
 
 ```bash
+cd /workspaces/agentcore-strands
 cd agent
 python3 -m venv .venv
 source .venv/bin/activate
